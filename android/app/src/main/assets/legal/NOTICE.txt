@@ -1,0 +1,84 @@
+SC Kokoro
+Third-party attribution and modification notice
+
+This distribution combines and adapts work from the following upstream
+projects. Neither upstream project sponsors or endorses this derivative.
+
+1. adreno-llms
+
+   Source: https://github.com/a8nova/adreno-llms
+   Source revision used: 2f1aec494edf51536d130c0ba99c60676b0ff6fb
+   Copyright 2026 a8nova
+   License: Apache License 2.0
+
+   The Kokoro-82M native inference runtime, OpenCL kernels, model build logic,
+   persistent streaming protocol, and Android native-process foundations are
+   derived from adreno-llms. They were modified in 2026 to form a standalone
+   Android system TTS engine and automatic Kokoro installer.
+
+2. VoxSherpa TTS
+
+   Source: https://github.com/CodeBySonu95/VoxSherpa-TTS
+   Source revision consulted: cdb6843f4998f4bba2f7a46c1f4a897c269fa4aa
+   Copyright (C) 2025 CodeBySonu95
+   License: GNU General Public License version 3 or later
+
+   VoxSherpa's Android system-wide TTS service, voice-discovery, settings, and
+   synthesis-callback architecture were used as the reference and basis for
+   this project's system-engine integration. VoxSherpa's neural inference
+   engines and other application features are not included.
+
+3. Kokoro
+
+   Source: https://github.com/hexgrad/kokoro
+   Source revision consulted: dfb907a02bba8152ca444717ca5d78747ccb4bec
+   Model: https://huggingface.co/hexgrad/Kokoro-82M
+   License: Apache License 2.0
+
+   The application automatically downloads converted Kokoro-82M weights and
+   28 US and UK English style voices from a8nova/adreno-llms-weights. The
+   downloaded model files are separate from the application source and retain
+   their upstream Apache-2.0 terms.
+
+4. eSpeak NG
+
+   Source: https://github.com/espeak-ng/espeak-ng
+   Version: 1.52.0 (revision 4870adfa25b1a32b4361592f1be8a40337c58d6c)
+   License: GNU General Public License version 3 or later, with supporting
+   files under the additional licenses included in LICENSES/.
+
+   eSpeak NG is built into the Kokoro native executable to perform on-device
+   grapheme-to-phoneme conversion. Its English language data downloads on the
+   first application launch.
+
+5. Build-time components
+
+   CLBlast 1.6.3: https://github.com/CNugteren/CLBlast
+   Khronos OpenCL Headers: https://github.com/KhronosGroup/OpenCL-Headers
+   License: Apache License 2.0
+
+   The packaged neutral OpenCL loader has API declarations generated from
+   Khronos OpenCL-Headers v2024.10.24. Copyright The Khronos Group Inc.
+   Its forwarding implementation is copyright 2026 Labsii Ltd., Apache-2.0.
+   Device-vendor OpenCL implementations are not included or redistributed.
+
+0.6.5 modifications by Labsii Ltd. (2026)
+
+   Request-scoped worker ownership and protocol v2; cancellation lifecycle and
+   native buffer cleanup; generator memory ownership and allocation reduction;
+   mandatory inference-error propagation; native input bounds; OpenCL device
+   selection and portable driver loading; verified installation receipts and
+   bundled-runtime generations; experimental-device self-test; regression tests.
+
+The combined Android application and integration work are distributed under
+the GNU General Public License version 3 or later. Apache-licensed material
+retains its original copyright and license terms. Complete license texts are
+available in LICENSES/ and through Credits and licenses inside the app.
+
+Labsii Ltd. branding exception
+
+The names "Speech Central", "Kokoro Voices by Speech Central", and "Kokoro
+SC" / "SC Kokoro", together with the supplied gradient background and launcher icon derived
+from it, are Labsii Ltd. branding. They are not licensed under GPL-3.0-or-later
+or another open-source license by their inclusion in this repository. See
+BRANDING.md for the terms that apply to these materials.
