@@ -361,7 +361,7 @@ class MainActivity : Activity() {
     }
 
     private fun testGeneration(): String =
-        "0.6.6:${packageManager.getPackageInfo(packageName, 0).lastUpdateTime}:$detectedRenderer"
+        "0.6.8:${packageManager.getPackageInfo(packageName, 0).lastUpdateTime}:$detectedRenderer"
 
     private fun openSpeechCentral() {
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SPEECH_CENTRAL_URL)))

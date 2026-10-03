@@ -6,6 +6,7 @@
  */
 package com.labsii.voices.system
 
+import android.content.ComponentCallbacks2
 import android.media.AudioFormat
 import android.speech.tts.SynthesisCallback
 import android.speech.tts.SynthesisRequest
@@ -41,7 +42,7 @@ class AdrenoTtsService : TextToSpeechService() {
         session = KokoroSession(applicationContext)
         Log.i(
             TAG,
-            "Service created (0.6.6, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
+            "Service created (0.6.8, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
                 "runtimeReady=${KokoroModelManager.isRuntimeReady(applicationContext)}",
         )
         super.onCreate()
@@ -86,6 +87,7 @@ class AdrenoTtsService : TextToSpeechService() {
 
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
         synthesisLock.lock()
+        val startedAt = System.nanoTime()
         var state: KokoroSession.Request? = null
         var callbackStarted = false
         var callbackFinished = false
@@ -156,6 +158,8 @@ class AdrenoTtsService : TextToSpeechService() {
             }
         } finally {
             if (callbackStarted && !callbackFinished && state?.cancelled?.get() != true) callback.done()
+            Log.i(TAG, "Synthesis finished id=${state?.id}, cancelled=${state?.cancelled?.get() == true}, " +
+                "elapsedMs=${(System.nanoTime() - startedAt) / 1_000_000}")
             state?.let { session.finishRequest(it) }
             if (activeRequest === state) {
                 activeRequest = null
@@ -181,6 +185,14 @@ class AdrenoTtsService : TextToSpeechService() {
         activeRequest?.cancelled?.set(true)
         if (::session.isInitialized) session.close()
         super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION") // Includes UI-hidden/background hints on newer Android releases.
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW && ::session.isInitialized) {
+            session.releaseIdleWorker("Android memory pressure ($level)")
+        }
     }
 
     private fun streamPcm(

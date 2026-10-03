@@ -1817,6 +1817,7 @@ struct GenArena {
     std::vector<Slot> slots;
     size_t pos = 0;
     size_t retained = 0;
+    size_t reported = 0;
     size_t budget = 768ULL * 1024 * 1024;
     uint64_t generation = 0;   // bumps on any slot realloc → invalidates recordings
     void reset() { pos = 0; }  // grow-only: slots persist across T changes (streaming
@@ -1838,6 +1839,11 @@ struct GenArena {
             s.bytes = (err == CL_SUCCESS) ? alloc : 0;
             if (err != CL_SUCCESS || !s.mem) { s.bytes = 0; throw std::runtime_error("Kokoro scratch allocation failed"); }
             retained += s.bytes;
+            if (retained >= reported + 64ULL * 1024 * 1024) {
+                reported = retained;
+                std::fprintf(stderr, "KOKORO_MEMORY scratch_retained_bytes=%zu\n", retained);
+                std::fflush(stderr);
+            }
             ++generation;
         }
         return s.mem;

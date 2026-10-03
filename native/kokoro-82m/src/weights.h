@@ -39,8 +39,9 @@ public:
     // this costs nothing extra; for models with truly optional tensors it
     // would waste some VRAM.
     //
-    // Returns number of buffers created (== number of distinct tensor keys).
-    size_t pre_allocate_all();
+    // Returns false immediately if a GPU allocation fails; a partially loaded
+    // model must not announce readiness under memory pressure.
+    bool pre_allocate_all();
 
     // Get raw float pointer (host memory). Returns nullptr if key not found.
     const float* get_host(const std::string& key) const;

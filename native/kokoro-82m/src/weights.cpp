@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <cstdlib>   // std::getenv (weight roundtrip mode)
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 #include <algorithm>
@@ -392,24 +393,31 @@ cl_mem Weights::get_buffer(const std::string& key, bool optional) {
     return meta.buffer;
 }
 
-size_t Weights::pre_allocate_all() {
+bool Weights::pre_allocate_all() {
     // Walk the tensor metadata in any order and force-create the GPU buffer
     // for each. Skips tensors whose buffer is already created (some code
     // paths warm a few specific weights before this is called).
-    size_t created = 0, skipped_present = 0;
+    size_t created = 0, skipped_present = 0, bytes = 0;
     auto t0 = std::chrono::steady_clock::now();
     for (auto& kv : tensors_) {
-        if (kv.second.buffer != nullptr) { skipped_present++; continue; }
+        if (kv.second.buffer != nullptr) { skipped_present++; bytes += kv.second.size_bytes; continue; }
         // optional=true: pre-alloc never logs "missing" — missing keys would
         // only happen if the meta is corrupt, which load() would have caught.
         cl_mem buf = get_buffer(kv.first, /*optional=*/true);
-        if (buf) created++;
+        if (!buf) {
+            NNOPT_ERROR_FMT("GPU weight preallocation failed after %zu of %zu buffers", created + skipped_present, tensors_.size());
+            return false;
+        }
+        created++;
+        bytes += kv.second.size_bytes;
     }
     auto t1 = std::chrono::steady_clock::now();
     double s = std::chrono::duration<double>(t1 - t0).count();
     NNOPT_CHECKPOINT_FMT("weights: pre-allocated %zu GPU buffers (%zu already present) in %.3fs",
                          created, skipped_present, s);
-    return created;
+    std::fprintf(stderr, "KOKORO_MEMORY weight_buffers_bytes=%zu buffers=%zu\n", bytes, created + skipped_present);
+    std::fflush(stderr);
+    return true;
 }
 
 const float* Weights::get_host(const std::string& key) const {

@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import java.io.DataInputStream
 import java.io.File
 import java.io.IOException
@@ -36,6 +37,8 @@ class KokoroSession internal constructor(
     private val deadlines: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "kokoro-deadlines").apply { isDaemon = true }
     },
+    private val retirementTimeoutMs: Long = RETIREMENT_TIMEOUT_MS,
+    private val idleTimeoutMs: Long = IDLE_TIMEOUT_MS,
 ) {
     constructor(context: Context) : this(
         context.applicationInfo.nativeLibraryDir, KokoroModelManager.runtimeDir(context),
@@ -45,6 +48,7 @@ class KokoroSession internal constructor(
     private var active: Request? = null
     private var bound: Worker? = null
     private var closed = false
+    private var idleRetirement: ScheduledFuture<*>? = null
     private val ids = AtomicLong()
 
     class Request internal constructor(val id: Long) {
@@ -88,6 +92,8 @@ class KokoroSession internal constructor(
     fun beginRequest(): Request = synchronized(lock) {
         check(!closed) { "Kokoro session is closed" }
         check(active == null) { "Concurrent Kokoro requests are not supported" }
+        idleRetirement?.cancel(false)
+        idleRetirement = null
         Request(ids.incrementAndGet()).also { active = it; bound = null }
     }
 
@@ -96,7 +102,22 @@ class KokoroSession internal constructor(
             request.fallback?.cancel(false)
             active = null
             bound = null
+            worker?.takeIf { it.process.isAlive && !it.retiring.get() }?.let { idleWorker ->
+                idleRetirement = deadlines.schedule({
+                    synchronized(lock) {
+                        if (!closed && active == null && worker === idleWorker) {
+                            retire(idleWorker, "idle memory reclamation")
+                        }
+                    }
+                }, idleTimeoutMs, TimeUnit.MILLISECONDS)
+            }
         }
+    }
+
+    /** Free the warm model when Android reports pressure and no request owns it. */
+    fun releaseIdleWorker(reason: String) = synchronized(lock) {
+        if (!closed && active == null) worker?.let { retire(it, reason) }
+        Unit
     }
 
     suspend fun start(request: Request, voicePackPath: String, phonemizerVoice: String) =
@@ -118,7 +139,15 @@ class KokoroSession internal constructor(
                 return@withContext
             }
             // Failed retirement prevents spawning overlapping heavy workers.
-            if (previous != null) retire(previous, "voice change or dead worker").await()
+            if (previous != null) {
+                try {
+                    withTimeout(retirementTimeoutMs.milliseconds) {
+                        retire(previous, "voice change or dead worker").await()
+                    }
+                } catch (timeout: TimeoutCancellationException) {
+                    throw IOException("Native worker did not retire within ${retirementTimeoutMs}ms", timeout)
+                }
+            }
             if (request.cancelled.get()) return@withContext
             require(cwd.isDirectory) { "Kokoro runtime is not installed: $cwd" }
             val binary = File(nativeLibDir, "libkokoro.so")
@@ -153,7 +182,7 @@ class KokoroSession internal constructor(
                 retire(started, "startup failed")
                 throw t
             }
-            Log.i(TAG, "Kokoro ready: protocol=2 build=0.6.6")
+            Log.i(TAG, "Kokoro ready: protocol=2 build=0.6.8")
         }
 
     /** Pipe reads live on the reader thread, so timeout also covers partial PCM. */
@@ -231,6 +260,7 @@ class KokoroSession internal constructor(
         active?.cancelled?.set(true)
         active?.fallback?.cancel(false)
         worker?.let { retire(it, "service destroyed") }
+        idleRetirement?.cancel(false)
         deadlines.shutdownNow()
         Unit
     }
@@ -270,6 +300,8 @@ class KokoroSession internal constructor(
                             if (target.events.trySend(KokoroProtocol.Audio(header.id, samples, header.rate)).isFailure) break
                         } else if (line.startsWith("KOKORO_UTT_END ")) {
                             if (target.events.trySend(KokoroProtocol.end(line)).isFailure) break
+                        } else if (line.startsWith("KOKORO_MEMORY ")) {
+                            Log.i(TAG, line)
                         } else if (line.startsWith("ERROR:") || line.startsWith("FATAL")) {
                             Log.w(TAG, line)
                         }
@@ -291,21 +323,27 @@ class KokoroSession internal constructor(
         target.ready.completeExceptionally(error)
         target.events.close(error)
         target.commands.shutdownNow()
+        val pid = runCatching { target.process.pid() }.getOrDefault(-1L)
+        Log.i(TAG, "Retiring native worker pid=$pid: $reason")
         thread(name = "kokoro-retire", isDaemon = true) {
             try {
-                // Kill before close: stream close may wait behind readFully/flush.
+                // Process exit is the gate for starting a replacement. Closing
+                // Java pipes can block behind another reader/writer and must
+                // never hold the retirement acknowledgement hostage.
                 target.process.destroy()
                 if (!target.process.waitFor(1, TimeUnit.SECONDS)) {
                     target.process.destroyForcibly()
                     if (!target.process.waitFor(2, TimeUnit.SECONDS)) throw IOException("Native worker did not exit")
                 }
+                target.retired.complete(Unit)
+                Log.i(TAG, "Native worker exited pid=$pid")
+            } catch (t: Throwable) {
+                target.retired.completeExceptionally(t)
+                Log.e(TAG, "Worker retirement failed pid=$pid", t)
+            } finally {
                 runCatching { target.writer.close() }
                 runCatching { target.pcm.close() }
                 runCatching { target.process.errorStream.close() }
-                target.retired.complete(Unit)
-            } catch (t: Exception) {
-                target.retired.completeExceptionally(t)
-                Log.e(TAG, "Worker retirement failed", t)
             }
         }
         return target.retired
@@ -316,5 +354,7 @@ class KokoroSession internal constructor(
         private const val START_TIMEOUT_MS = 120_000L
         private const val SYNTHESIS_TIMEOUT_MS = 120_000L
         private const val CANCEL_FALLBACK_MS = 2_500L
+        private const val RETIREMENT_TIMEOUT_MS = 5_000L
+        private const val IDLE_TIMEOUT_MS = 120_000L
     }
 }

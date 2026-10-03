@@ -33,7 +33,11 @@ class KokoroSessionTest {
         override fun close() { closed = true; bytes.offer(-1) }
     }
 
-    private class FakeProcess(val handle: (FakeProcess, String) -> Unit) : Process() {
+    private class FakeProcess(
+        private val closeGate: CountDownLatch? = null,
+        private val refuseExit: Boolean = false,
+        val handle: (FakeProcess, String) -> Unit,
+    ) : Process() {
         val audio = Pipe()
         val errors = Pipe()
         val ended = CountDownLatch(1)
@@ -45,6 +49,7 @@ class KokoroSessionTest {
                 if (value == 10) { val text = line.toString("UTF-8"); line.reset(); handle(this@FakeProcess, text) }
                 else line.write(value)
             }
+            override fun close() { closeGate?.await() }
         }
         init { event("ready. protocol=2 build=test") }
         fun event(value: String) = errors.put((value + "\n").toByteArray())
@@ -60,7 +65,10 @@ class KokoroSessionTest {
         override fun waitFor(): Int { ended.await(); return 0 }
         override fun waitFor(timeout: Long, unit: TimeUnit) = ended.await(timeout, unit)
         override fun exitValue(): Int { if (alive.get()) throw IllegalThreadStateException(); return 0 }
-        override fun destroy() { alive.set(false); audio.close(); errors.close(); ended.countDown() }
+        override fun destroy() {
+            if (refuseExit) return
+            alive.set(false); audio.close(); errors.close(); ended.countDown()
+        }
         override fun destroyForcibly(): Process { destroy(); return this }
     }
 
@@ -78,11 +86,14 @@ class KokoroSessionTest {
         factory: () -> FakeProcess,
         timeout: Long = 1000,
         scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(),
+        retirementTimeout: Long = 5000,
+        idleTimeout: Long = 120000,
         body: suspend (KokoroSession) -> Unit,
     ) {
         val dir = Files.createTempDirectory("kokoro-session-test").toFile()
         File(dir, "libkokoro.so").writeText("fixture")
-        val session = KokoroSession(dir.path, dir, { factory() }, timeout, 50, scheduler)
+        val session = KokoroSession(dir.path, dir, { factory() }, timeout, 50, scheduler,
+            retirementTimeout, idleTimeout)
         try { body(session) } finally { session.close(); scheduler.shutdownNow(); dir.deleteRecursively() }
     }
 
@@ -231,6 +242,65 @@ class KokoroSessionTest {
                 session.finishRequest(request)
             }
             assertEquals(3, starts)
+        }
+    }
+
+    @Test fun blockedPipeCloseCannotDelayReplacementAfterWorkerExit() = runBlocking {
+        val closeGate = CountDownLatch(1)
+        var starts = 0
+        try {
+            fixture({
+                starts++
+                FakeProcess(closeGate = if (starts == 1) closeGate else null) { p, line ->
+                    p.success(line.split(' ')[1])
+                }
+            }, retirementTimeout = 500) { session ->
+                val first = session.beginRequest()
+                session.start(first, "heart", "en-us")
+                session.speak(first, "First.", 1f) {}
+                session.finishRequest(first)
+                val second = session.beginRequest()
+                withTimeout(1000) { session.start(second, "bella", "en-us") }
+                session.speak(second, "Second.", 1f) {}
+                session.finishRequest(second)
+                assertEquals(2, starts)
+            }
+        } finally { closeGate.countDown() }
+    }
+
+    @Test fun unresponsiveWorkerRetirementHasDeadlineAndNeverOverlaps() = runBlocking {
+        var starts = 0
+        fixture({
+            starts++
+            FakeProcess(refuseExit = true) { p, line -> p.success(line.split(' ')[1]) }
+        }, retirementTimeout = 80) { session ->
+            val first = session.beginRequest()
+            session.start(first, "heart", "en-us")
+            session.finishRequest(first)
+            val second = session.beginRequest()
+            try { session.start(second, "bella", "en-us"); fail("Expected retirement timeout") }
+            catch (error: IOException) { assertTrue(error.message!!.contains("did not retire")) }
+            session.finishRequest(second)
+            assertEquals(1, starts)
+        }
+    }
+
+    @Test fun idleWorkerReleasesNativeMemory() = runBlocking {
+        var starts = 0
+        lateinit var process: FakeProcess
+        fixture({
+            starts++
+            FakeProcess { p, line -> p.success(line.split(' ')[1]) }.also { process = it }
+        }, idleTimeout = 50) { session ->
+            val first = session.beginRequest()
+            session.start(first, "heart", "en-us")
+            session.finishRequest(first)
+            assertTrue(process.ended.await(1, TimeUnit.SECONDS))
+            val second = session.beginRequest()
+            session.start(second, "heart", "en-us")
+            session.speak(second, "Still works.", 1f) {}
+            session.finishRequest(second)
+            assertEquals(2, starts)
         }
     }
 }

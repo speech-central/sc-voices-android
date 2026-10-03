@@ -151,7 +151,7 @@ static bool probe_kokoro_opencl(OpenCLContext& cl_ctx, std::string& reason) {
 int main(int argc, char** argv) {
     // Build marker — lets us confirm from the engine log which binary is
     // actually running. Bump the tag on every device-facing engine change.
-    fprintf(stderr, "[engine] kokoro build: 0.6.6 protocol=2\n");
+    fprintf(stderr, "[engine] kokoro build: 0.6.8 protocol=2\n");
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
     // Argument parsing: positional "prompt" + optional flags.
@@ -273,7 +273,10 @@ int main(int argc, char** argv) {
         if (pre_alloc) {
             std::fprintf(stderr, "[engine] GPU weight preallocation begin\n");
             std::fflush(stderr);
-            weights.pre_allocate_all();
+            if (!weights.pre_allocate_all()) {
+                NNOPT_ERROR("GPU weight preallocation failed; insufficient device memory");
+                return 6;
+            }
             std::fprintf(stderr, "[engine] GPU weight preallocation end\n");
             std::fflush(stderr);
         }
@@ -443,7 +446,7 @@ int main(int argc, char** argv) {
             return 5;
 
         // Protocol v2 pairs every audio/terminal frame with a command ID.
-        std::fprintf(stderr, "ready. protocol=2 build=0.6.6\n");
+        std::fprintf(stderr, "ready. protocol=2 build=0.6.8\n");
         std::fflush(stderr);
         TtsCommandReader reader(STDIN_FILENO);
         TtsCommand command;
