@@ -184,7 +184,7 @@ class KokoroSession internal constructor(
                 retire(started, "startup failed")
                 throw t
             }
-            Log.i(TAG, "Kokoro ready: protocol=2 build=0.6.9")
+            Log.i(TAG, "Kokoro ready: protocol=2 build=0.6.10")
         }
 
     /** Pipe reads live on the reader thread, so timeout also covers partial PCM. */

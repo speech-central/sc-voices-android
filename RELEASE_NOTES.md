@@ -1,3 +1,21 @@
+# 0.6.10 (versionCode 27)
+
+Bounded scratch-memory recovery for continuous reading:
+
+- After a scratch-budget failure, drain queued GPU work and release the
+  generator arena before retrying smaller word-aligned pieces. The 0.6.9
+  retry retained most scratch allocations, so smaller pieces could repeat
+  the same failure and cause long pauses.
+- Do not start another split after three retries or when 20 seconds have
+  elapsed since the first scratch failure. An individual GPU call can still
+  take longer. If recovery cannot finish, return an explicit synthesis
+  error and retire the worker. This limits retry cascades; it cannot make
+  inherently over-budget input synthesize successfully.
+- Normal utterances keep the warm arena and are not split preemptively.
+
+Native syntax and control checks pass. This still needs an Adreno 619
+continuous-reading test to verify behavior under real GPU memory pressure.
+
 # 0.6.9 (versionCode 26)
 
 Recovery for a scratch-memory safety-budget failure during synthesis:

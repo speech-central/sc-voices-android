@@ -42,7 +42,7 @@ class AdrenoTtsService : TextToSpeechService() {
         session = KokoroSession(applicationContext)
         Log.i(
             TAG,
-            "Service created (0.6.9, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
+            "Service created (0.6.10, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
                 "runtimeReady=${KokoroModelManager.isRuntimeReady(applicationContext)}",
         )
         super.onCreate()

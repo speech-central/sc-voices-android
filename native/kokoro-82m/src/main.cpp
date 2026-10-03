@@ -50,6 +50,8 @@
 #include "benchmark.h"  // BenchmarkTimer + NNOPT_BENCH_FIRST_TOKEN — see prefill/decode call sites below
 #include "profiler.h"   // KernelProfiler::dump_summary — dormant unless NNOPT_PROFILE=1.
 
+extern "C" void nnopt_gen_reclaim_scratch_after_drain();
+
 
 #include "load_bin.h"    // load_int32_bin, load_float_bin (fixture loaders)
 #include "write_wav.h"   // write_wav (RIFF int16 PCM, 16kHz mono)
@@ -151,7 +153,7 @@ static bool probe_kokoro_opencl(OpenCLContext& cl_ctx, std::string& reason) {
 int main(int argc, char** argv) {
     // Build marker — lets us confirm from the engine log which binary is
     // actually running. Bump the tag on every device-facing engine change.
-    fprintf(stderr, "[engine] kokoro build: 0.6.9 protocol=2\n");
+    fprintf(stderr, "[engine] kokoro build: 0.6.10 protocol=2\n");
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
     // Argument parsing: positional "prompt" + optional flags.
@@ -446,7 +448,7 @@ int main(int argc, char** argv) {
             return 5;
 
         // Protocol v2 pairs every audio/terminal frame with a command ID.
-        std::fprintf(stderr, "ready. protocol=2 build=0.6.9\n");
+        std::fprintf(stderr, "ready. protocol=2 build=0.6.10\n");
         std::fflush(stderr);
         TtsCommandReader reader(STDIN_FILENO);
         TtsCommand command;
@@ -465,6 +467,8 @@ int main(int argc, char** argv) {
             }
             bool cancelled = false;
             bool produced = false;
+            int scratch_retries = 0;
+            std::chrono::steady_clock::time_point first_scratch_failure;
             auto split_for_retry = [&](const std::string& text) {
                 size_t cut = text.rfind(' ', text.size() / 2);
                 if (cut == std::string::npos || cut == 0) cut = text.find(' ', text.size() / 2);
@@ -498,13 +502,29 @@ int main(int argc, char** argv) {
                 try { rc = model.forward_graph(ids, style, pcm, command.rate); }
                 catch (const std::exception& error) {
                     if (std::string(error.what()).find("Kokoro scratch-memory safety budget exceeded") != std::string::npos) {
-                        // The failed graph may have queued GPU work. Drain it
-                        // before reusing arena slots for smaller text pieces.
-                        if (clFinish(cl_ctx.queue()) == CL_SUCCESS && split_for_retry(text)) {
-                            std::fprintf(stderr, "KOKORO_MEMORY split_retry chars=%zu\n", text.size());
-                            std::fflush(stderr);
-                            continue;
+                        // An aborted graph may still have GPU work queued.
+                        // Drain before releasing all retained arena slots;
+                        // otherwise every smaller retry inherits the same
+                        // nearly-full memory budget.
+                        if (clFinish(cl_ctx.queue()) != CL_SUCCESS) {
+                            NNOPT_ERROR("Scratch recovery could not drain the GPU queue");
+                            finish("ERROR"); return 7;
                         }
+                        nnopt_gen_reclaim_scratch_after_drain();
+                        const auto now = std::chrono::steady_clock::now();
+                        if (scratch_retries == 0) first_scratch_failure = now;
+                        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                            now - first_scratch_failure).count();
+                        if (scratch_retries >= 3 || elapsed >= 20 || !split_for_retry(text)) {
+                            NNOPT_ERROR_FMT("Scratch recovery stopped after %d splits (%lld s)",
+                                            scratch_retries, (long long)elapsed);
+                            finish("ERROR"); return 7;
+                        }
+                        ++scratch_retries;
+                        std::fprintf(stderr, "KOKORO_MEMORY split_retry chars=%zu attempt=%d\n",
+                                     text.size(), scratch_retries);
+                        std::fflush(stderr);
+                        continue;
                     }
                     NNOPT_ERROR_FMT("Inference exception: %s", error.what());
                 }

@@ -1823,6 +1823,15 @@ struct GenArena {
     void reset() { pos = 0; }  // grow-only: slots persist across T changes (streaming
                                // chunks vary in length; dropping per T was full
                                // clCreateBuffer churn on every chunk)
+    void reclaimAfterDrain() {
+        for (Slot& slot : slots) {
+            if (slot.mem) clReleaseMemObject(slot.mem);
+        }
+        slots.clear();
+        pos = 0;
+        retained = reported = 0;
+        ++generation; // Any recording using old handles is no longer valid.
+    }
     cl_mem get(cl_context ctx, size_t bytes) {
         if (pos == slots.size()) slots.push_back({});
         Slot& s = slots[pos++];
@@ -1865,6 +1874,14 @@ struct GenArena {
 };
 static GenArena g_gen_arena;
 static bool g_gen_arena_active = false;
+
+// Call only after a failed graph unwinds and clFinish drains its queue.
+extern "C" void nnopt_gen_reclaim_scratch_after_drain() {
+    const size_t bytes = g_gen_arena.retained;
+    g_gen_arena.reclaimAfterDrain();
+    std::fprintf(stderr, "KOKORO_MEMORY scratch_reclaimed_bytes=%zu\n", bytes);
+    std::fflush(stderr);
+}
 
 // All generator-path buffer releases funnel through this: forwards to
 // clReleaseMemObject normally; no-op while the arena owns the allocations.
