@@ -323,8 +323,8 @@ class KokoroSession internal constructor(
         target.ready.completeExceptionally(error)
         target.events.close(error)
         target.commands.shutdownNow()
-        val pid = runCatching { target.process.pid() }.getOrDefault(-1L)
-        Log.i(TAG, "Retiring native worker pid=$pid: $reason")
+        val workerId = System.identityHashCode(target.process)
+        Log.i(TAG, "Retiring native worker id=$workerId: $reason")
         thread(name = "kokoro-retire", isDaemon = true) {
             try {
                 // Process exit is the gate for starting a replacement. Closing
@@ -336,10 +336,10 @@ class KokoroSession internal constructor(
                     if (!target.process.waitFor(2, TimeUnit.SECONDS)) throw IOException("Native worker did not exit")
                 }
                 target.retired.complete(Unit)
-                Log.i(TAG, "Native worker exited pid=$pid")
+                Log.i(TAG, "Native worker exited id=$workerId")
             } catch (t: Throwable) {
                 target.retired.completeExceptionally(t)
-                Log.e(TAG, "Worker retirement failed pid=$pid", t)
+                Log.e(TAG, "Worker retirement failed id=$workerId", t)
             } finally {
                 runCatching { target.writer.close() }
                 runCatching { target.pcm.close() }
