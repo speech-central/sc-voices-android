@@ -8,6 +8,8 @@ package com.labsii.voices.system
 
 import android.content.ComponentCallbacks2
 import android.media.AudioFormat
+import android.os.PowerManager
+import android.os.SystemClock
 import android.speech.tts.SynthesisCallback
 import android.speech.tts.SynthesisRequest
 import android.speech.tts.TextToSpeech
@@ -25,6 +27,7 @@ import java.util.concurrent.locks.ReentrantLock
 class AdrenoTtsService : TextToSpeechService() {
     private lateinit var catalog: InstalledKokoroVoiceCatalog
     private lateinit var session: KokoroSession
+    private lateinit var synthesisWakeLock: PowerManager.WakeLock
     /**
      * Android can create a replacement TTS client while the previous request is
      * still being cancelled.  A single mutable `cancelled` Boolean makes those
@@ -40,9 +43,12 @@ class AdrenoTtsService : TextToSpeechService() {
         // TextToSpeechService.onCreate() synchronously calls onLoadLanguage().
         catalog = InstalledKokoroVoiceCatalog(applicationContext)
         session = KokoroSession(applicationContext)
+        synthesisWakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:KokoroSynthesis")
+            .apply { setReferenceCounted(false) }
         Log.i(
             TAG,
-            "Service created (0.6.10, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
+            "Service created (0.6.11, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
                 "runtimeReady=${KokoroModelManager.isRuntimeReady(applicationContext)}",
         )
         super.onCreate()
@@ -88,12 +94,18 @@ class AdrenoTtsService : TextToSpeechService() {
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
         synthesisLock.lock()
         val startedAt = System.nanoTime()
+        val startedRealMs = SystemClock.elapsedRealtime()
+        var wakeLockAcquired = false
         var state: KokoroSession.Request? = null
         var callbackStarted = false
         var callbackFinished = false
         var chunkIndex = 0
         var chunkCount = 0
         try {
+            // File synthesis may have no active Media3 player in the client.
+            // Keep the CPU awake only while this request is actually running.
+            synthesisWakeLock.acquire(SYNTHESIS_WAKE_LOCK_TIMEOUT_MS)
+            wakeLockAcquired = true
             val current = session.beginRequest()
             state = current
             activeRequest = current
@@ -164,12 +176,17 @@ class AdrenoTtsService : TextToSpeechService() {
         } finally {
             if (callbackStarted && !callbackFinished && state?.cancelled?.get() != true) callback.done()
             Log.i(TAG, "Synthesis finished id=${state?.id}, cancelled=${state?.cancelled?.get() == true}, " +
-                "elapsedMs=${(System.nanoTime() - startedAt) / 1_000_000}")
+                "elapsedMs=${(System.nanoTime() - startedAt) / 1_000_000}, " +
+                "elapsedRealtimeMs=${SystemClock.elapsedRealtime() - startedRealMs}")
             state?.let { session.finishRequest(it) }
             if (activeRequest === state) {
                 activeRequest = null
             }
-            synthesisLock.unlock()
+            try {
+                if (wakeLockAcquired && synthesisWakeLock.isHeld) synthesisWakeLock.release()
+            } finally {
+                synthesisLock.unlock()
+            }
         }
     }
 
@@ -242,5 +259,6 @@ class AdrenoTtsService : TextToSpeechService() {
         private const val DEFAULT_SPEECH_RATE = 1.0f
         private const val MIN_SPEECH_RATE = 0.5f
         private const val MAX_SPEECH_RATE = 2.0f
+        private const val SYNTHESIS_WAKE_LOCK_TIMEOUT_MS = 5 * 60_000L
     }
 }

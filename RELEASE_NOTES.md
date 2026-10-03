@@ -1,3 +1,19 @@
+# 0.6.11 (versionCode 28)
+
+Keep active system TTS synthesis running with the screen off:
+
+- Hold a timeout-limited partial CPU wake lock from the start of a synthesis
+  request until its Android callback and native cleanup finish. Release it
+  on every exit path. The lock does not turn on the screen or cover gaps
+  before the controlling app submits its next request.
+- Log both awake-time `elapsedMs` and deep-sleep-inclusive
+  `elapsedRealtimeMs`. Divergence identifies device suspension.
+
+The active service compiles with host Android stubs; native syntax and control
+checks remain passing from 0.6.10. A full Android Gradle build and screen-off
+test are still required. The controlling media app should maintain its own
+background playback lifecycle and wake policy while waiting between items.
+
 # 0.6.10 (versionCode 27)
 
 Bounded scratch-memory recovery for continuous reading:
