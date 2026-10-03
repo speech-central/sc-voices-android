@@ -11,7 +11,7 @@ yet; the service/model boundary is intentionally small so it can be added as a
 second engine without bringing back unrelated Edgi application code.
 
 The application and Android TTS engine use the short display name **SC Kokoro**.
-Package ID: `com.labsii.voices`. Version: **0.6.8 (25)**.
+Package ID: `com.labsii.voices`. Version: **0.6.9 (26)**.
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for fixes and validation limits.
 
 ## What is included

@@ -151,7 +151,7 @@ static bool probe_kokoro_opencl(OpenCLContext& cl_ctx, std::string& reason) {
 int main(int argc, char** argv) {
     // Build marker — lets us confirm from the engine log which binary is
     // actually running. Bump the tag on every device-facing engine change.
-    fprintf(stderr, "[engine] kokoro build: 0.6.8 protocol=2\n");
+    fprintf(stderr, "[engine] kokoro build: 0.6.9 protocol=2\n");
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
     // Argument parsing: positional "prompt" + optional flags.
@@ -446,7 +446,7 @@ int main(int argc, char** argv) {
             return 5;
 
         // Protocol v2 pairs every audio/terminal frame with a command ID.
-        std::fprintf(stderr, "ready. protocol=2 build=0.6.8\n");
+        std::fprintf(stderr, "ready. protocol=2 build=0.6.9\n");
         std::fflush(stderr);
         TtsCommandReader reader(STDIN_FILENO);
         TtsCommand command;
@@ -465,6 +465,14 @@ int main(int argc, char** argv) {
             }
             bool cancelled = false;
             bool produced = false;
+            auto split_for_retry = [&](const std::string& text) {
+                size_t cut = text.rfind(' ', text.size() / 2);
+                if (cut == std::string::npos || cut == 0) cut = text.find(' ', text.size() / 2);
+                if (cut == std::string::npos || cut == 0 || cut + 1 >= text.size()) return false;
+                chunks.push_front(text.substr(cut + 1));
+                chunks.push_front(text.substr(0, cut));
+                return true;
+            };
             while (!chunks.empty()) {
                 if (nnopt_tts_cancelled()) { cancelled = true; break; }
                 std::string text = std::move(chunks.front());
@@ -475,15 +483,11 @@ int main(int argc, char** argv) {
                 // Split only pathological phonemized input, retaining normal
                 // sentence prosody. Never silently truncate tokens or style.
                 if (ids.size() > 512) {
-                    size_t cut = text.rfind(' ', text.size() / 2);
-                    if (cut == std::string::npos || cut == 0) cut = text.find(' ', text.size() / 2);
-                    if (cut == std::string::npos || cut == 0 || cut + 1 >= text.size()) {
+                    if (!split_for_retry(text)) {
                         NNOPT_ERROR("Phonemized input exceeds 512 tokens with no safe split");
                         finish("ERROR");
                         return 7;
                     }
-                    chunks.push_front(text.substr(cut + 1));
-                    chunks.push_front(text.substr(0, cut));
                     continue;
                 }
                 int vidx = std::min(509, (int)ids.size() - 1);
@@ -492,17 +496,24 @@ int main(int argc, char** argv) {
                 std::vector<int16_t> pcm;
                 int rc = -1;
                 try { rc = model.forward_graph(ids, style, pcm, command.rate); }
-                catch (const std::exception& error) { NNOPT_ERROR_FMT("Inference exception: %s", error.what()); }
+                catch (const std::exception& error) {
+                    if (std::string(error.what()).find("Kokoro scratch-memory safety budget exceeded") != std::string::npos) {
+                        // The failed graph may have queued GPU work. Drain it
+                        // before reusing arena slots for smaller text pieces.
+                        if (clFinish(cl_ctx.queue()) == CL_SUCCESS && split_for_retry(text)) {
+                            std::fprintf(stderr, "KOKORO_MEMORY split_retry chars=%zu\n", text.size());
+                            std::fflush(stderr);
+                            continue;
+                        }
+                    }
+                    NNOPT_ERROR_FMT("Inference exception: %s", error.what());
+                }
                 if (rc == -2 || nnopt_tts_cancelled()) { cancelled = true; break; }
                 if (rc == -3) {
-                    size_t cut = text.rfind(' ', text.size() / 2);
-                    if (cut == std::string::npos || cut == 0) cut = text.find(' ', text.size() / 2);
-                    if (cut == std::string::npos || cut == 0 || cut + 1 >= text.size()) {
+                    if (!split_for_retry(text)) {
                         NNOPT_ERROR("Predicted speech exceeds safe memory capacity with no word boundary");
                         finish("ERROR"); return 7;
                     }
-                    chunks.push_front(text.substr(cut + 1));
-                    chunks.push_front(text.substr(0, cut));
                     continue;
                 }
                 if (rc != 0 || pcm.empty() || pcm.size() > 1440000) {

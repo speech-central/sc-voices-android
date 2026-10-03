@@ -1,3 +1,19 @@
+# 0.6.9 (versionCode 26)
+
+Recovery for a scratch-memory safety-budget failure during synthesis:
+
+- Reclaim unused generator arena slots before refusing a new buffer. This
+  limits retained memory from earlier, longer chunks without increasing the
+  768 MiB safety ceiling.
+- If a chunk still exceeds that ceiling, drain queued GPU work and retry it
+  in smaller word-aligned pieces. Ordinary sentences keep their existing
+  prosody and are not split proactively. A chunk with no safe word boundary
+  still fails and reports an Android synthesis error.
+- Native error details and failed chunk numbers remain available in Logcat.
+
+Native compilation checks and the 12 host session tests pass. Device testing
+remains necessary, especially for sustained reading on Adreno 619.
+
 # 0.6.8 (versionCode 25)
 
 Reliability update for low-memory devices and stalled native workers:
@@ -5,7 +21,7 @@ Reliability update for low-memory devices and stalled native workers:
 - Replacement requests have a five-second worker-retirement deadline. Process
   exit acknowledges retirement before Java pipe cleanup, so a blocked pipe
   close cannot leave all subsequent requests waiting without a timeout.
-- Native worker teardown logs its PID, reason, exit, or failure. Each synthesis
+- Native worker teardown logs its worker ID, reason, exit, or failure. Each synthesis
   logs completion and elapsed time, and rare native memory high-water markers
   report uploaded weight bytes and retained generator scratch capacity.
 - An idle worker releases its model after two minutes; Android memory-trim
@@ -13,6 +29,10 @@ Reliability update for low-memory devices and stalled native workers:
   still uses the warm worker.
 - Failed GPU weight preallocation now aborts startup instead of advertising a
   partially loaded worker as ready.
+- Diagnostic update: native inference errors now include the most recent native
+  error line, command ID and samples already produced. Service logs identify
+  the failed chunk. Android still receives its required error and done callbacks;
+  this update does not claim to resolve an unexplained native inference failure.
 
 The session's 12 host JVM tests pass, including new stuck-pipe, bounded
 retirement, and idle-release cases. Native control tests and C++ syntax checks

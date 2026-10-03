@@ -178,12 +178,16 @@ class KokoroSessionTest {
         fixture({ FakeProcess { p, line ->
             val id = line.split(' ')[1]
             p.event("KOKORO_PCM_BEGIN $id 1 24000"); p.audio.put(byteArrayOf(10, 0))
+            p.event("ERROR: Synthesis failed rc=-1 samples=0 (main.cpp:509)")
             p.event("KOKORO_UTT_END $id ERROR")
         } }) { session ->
             val request = session.beginRequest()
             session.start(request, "heart", "en-us")
             try { session.speak(request, "Hello.", 1f) {}; fail("Expected inference error") }
-            catch (_: IOException) {}
+            catch (error: IOException) {
+                assertTrue(error.message!!.contains("Synthesis failed rc=-1"))
+                assertTrue(error.message!!.contains("samples=1"))
+            }
             session.finishRequest(request)
         }
     }

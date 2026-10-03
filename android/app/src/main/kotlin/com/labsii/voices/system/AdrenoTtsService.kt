@@ -42,7 +42,7 @@ class AdrenoTtsService : TextToSpeechService() {
         session = KokoroSession(applicationContext)
         Log.i(
             TAG,
-            "Service created (0.6.8, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
+            "Service created (0.6.9, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
                 "runtimeReady=${KokoroModelManager.isRuntimeReady(applicationContext)}",
         )
         super.onCreate()
@@ -91,6 +91,8 @@ class AdrenoTtsService : TextToSpeechService() {
         var state: KokoroSession.Request? = null
         var callbackStarted = false
         var callbackFinished = false
+        var chunkIndex = 0
+        var chunkCount = 0
         try {
             val current = session.beginRequest()
             state = current
@@ -100,6 +102,7 @@ class AdrenoTtsService : TextToSpeechService() {
                 ?: throw IllegalStateException("Kokoro is not installed or does not support ${request.language}")
             Log.i(TAG, "Synthesis begin id=${current.id}, voice=${voice.voiceName}")
             val chunks = SystemTtsText.chunks(request.charSequenceText ?: "", voice.locale)
+            chunkCount = chunks.size
             val speechRate = request.speechRate
                 .takeIf { it > 0 }
                 ?.div(100.0f)
@@ -122,6 +125,7 @@ class AdrenoTtsService : TextToSpeechService() {
                 session.start(current, voice.voicePackPath, voice.phonemizerVoice)
             }
             for (chunk in chunks) {
+                chunkIndex++
                 if (current.cancelled.get()) return
                 // PCM arrives asynchronously; callbacks remain on Android's
                 // dedicated synthesis thread, never the reader/control threads.
@@ -151,7 +155,8 @@ class AdrenoTtsService : TextToSpeechService() {
             // failures do, and require a clean process on the next request.
             state?.let { session.failRequest(it) }
             if (state?.cancelled?.get() != true) {
-                Log.e(TAG, "Kokoro system synthesis failed", t)
+                Log.e(TAG, "Kokoro system synthesis failed id=${state?.id}, " +
+                    "chunk=$chunkIndex/$chunkCount", t)
                 callback.error()
                 callback.done()
                 callbackFinished = true

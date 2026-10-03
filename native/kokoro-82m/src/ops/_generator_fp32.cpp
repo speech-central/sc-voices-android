@@ -1831,7 +1831,21 @@ struct GenArena {
             // reuses the slot instead of regrowing it
             size_t alloc = (bytes + bytes / 8 + 4095) & ~(size_t)4095;
             cl_int err = CL_SUCCESS;
-            if (alloc > budget || retained - s.bytes > budget - alloc)
+            if (alloc > budget)
+                throw std::runtime_error("Kokoro scratch-memory safety budget exceeded");
+            // Earlier, longer chunks may have left tail slots that this graph
+            // has not touched. Reclaim those before rejecting a new chunk.
+            if (retained - s.bytes > budget - alloc) {
+                for (size_t i = slots.size(); i > pos && retained - s.bytes > budget - alloc; --i) {
+                    Slot& unused = slots[i - 1];
+                    if (!unused.mem) continue;
+                    clReleaseMemObject(unused.mem);
+                    retained -= unused.bytes;
+                    unused = {};
+                    ++generation;
+                }
+            }
+            if (retained - s.bytes > budget - alloc)
                 throw std::runtime_error("Kokoro scratch-memory safety budget exceeded");
             if (s.mem) clReleaseMemObject(s.mem);
             retained -= s.bytes;

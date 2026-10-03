@@ -24,6 +24,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -86,6 +87,7 @@ class KokoroSession internal constructor(
         val pcm = DataInputStream(process.inputStream)
         val retiring = AtomicBoolean()
         val retired = CompletableDeferred<Unit>()
+        val lastNativeError = AtomicReference<String?>(null)
         var commandId: Long? = null // protected by the session lock
     }
 
@@ -182,7 +184,7 @@ class KokoroSession internal constructor(
                 retire(started, "startup failed")
                 throw t
             }
-            Log.i(TAG, "Kokoro ready: protocol=2 build=0.6.8")
+            Log.i(TAG, "Kokoro ready: protocol=2 build=0.6.9")
         }
 
     /** Pipe reads live on the reader thread, so timeout also covers partial PCM. */
@@ -195,6 +197,7 @@ class KokoroSession internal constructor(
             val current = bound ?: throw IOException("Kokoro worker is unavailable")
             if (current.retiring.get()) throw IOException("Kokoro worker is retiring")
             current.commandId = commandId
+            current.lastNativeError.set(null)
             // Same lock + FIFO writer: CANCEL cannot overtake its SAY.
             send(current, KokoroProtocol.say(commandId, speechRate, text))
             current
@@ -214,7 +217,10 @@ class KokoroSession internal constructor(
                             when (event.status) {
                                 "OK" -> if (totalSamples == 0) throw IOException("Kokoro produced no audio")
                                 "CANCELLED" -> if (!request.cancelled.get()) throw IOException("Unexpected native cancellation")
-                                else -> throw IOException("Kokoro inference failed")
+                                else -> throw IOException(
+                                    "Kokoro inference failed (command=$commandId, samples=$totalSamples): " +
+                                        (target.lastNativeError.get() ?: "native worker reported ERROR without detail"),
+                                )
                             }
                             break
                         }
@@ -303,6 +309,7 @@ class KokoroSession internal constructor(
                         } else if (line.startsWith("KOKORO_MEMORY ")) {
                             Log.i(TAG, line)
                         } else if (line.startsWith("ERROR:") || line.startsWith("FATAL")) {
+                            target.lastNativeError.set(line.take(MAX_NATIVE_ERROR_LENGTH))
                             Log.w(TAG, line)
                         }
                     }
@@ -356,5 +363,6 @@ class KokoroSession internal constructor(
         private const val CANCEL_FALLBACK_MS = 2_500L
         private const val RETIREMENT_TIMEOUT_MS = 5_000L
         private const val IDLE_TIMEOUT_MS = 120_000L
+        private const val MAX_NATIVE_ERROR_LENGTH = 512
     }
 }
