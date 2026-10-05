@@ -11,7 +11,13 @@ yet; the service/model boundary is intentionally small so it can be added as a
 second engine without bringing back unrelated Edgi application code.
 
 The application and Android TTS engine use the short display name **SC Kokoro**.
-Package ID: `com.labsii.voices`. Version: **0.6.11 (28)**.
+Package ID: `com.labsii.voices`. Version: **0.6.23 (40)**.
+
+For uninterrupted screen-off reading on affected devices, allow SC Kokoro to
+ignore battery optimization when prompted after setup. The app checks the
+actual Android exemption and offers the same control on its status screen.
+In Samsung Galaxy Tab A9+ testing, adding this per-app exemption resolved the
+screen-off stall; disabling device-wide idle modes was not needed.
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for fixes and validation limits.
 
 ## What is included
@@ -43,6 +49,30 @@ Every downloaded file is checked against a SHA-256 digest pinned to the same
 repository revision before it is installed. A mismatching cached file is
 discarded and downloaded again. After validation, the app broadcasts that new
 TTS data is available.
+
+## Background reading
+
+After installation, SC Kokoro explains why background access is recommended and
+opens Android's confirmation dialog only after the user selects **Allow background
+reading**. **Not now** leaves the engine usable and the button available later.
+Already-exempt users are not prompted. The status refreshes when returning from
+Settings and shows revoked exemptions without repeatedly opening dialogs.
+
+The manifest permission `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` permits this
+user-approved request; it does not grant an exemption automatically. No engine
+wake lock, foreground service, audio-focus request, or silent playback is added.
+This permission is requested because idle restrictions were observed to break
+core offline background synthesis. Before Play submission, use that concrete
+functionality and device evidence when explaining the permission; store approval
+is not guaranteed by the implementation. See [Android's exemption guidance](https://developer.android.com/training/monitoring-device-state/doze-standby).
+
+The adaptive watchdog remains as bounded protection against native failures,
+with at most one retry before audio has been delivered. It cannot grant
+background execution. Cooperative cancellation, non-overlapping worker
+retirement, memory budgets, scratch reclamation and idle cleanup remain enabled.
+GPU priority stays low for interface responsiveness. Detailed diagnostics are
+limited to debug builds; release logs retain failures and deadline warnings.
+For developer troubleshooting only, see [the capture guide](docs/SCREEN_OFF_DIAGNOSTICS.md).
 
 ## Build
 

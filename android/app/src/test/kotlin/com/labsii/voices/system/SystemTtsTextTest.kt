@@ -31,4 +31,17 @@ class SystemTtsTextTest {
         assertEquals(text, chunks.joinToString(""))
         assertTrue(chunks.none { it.lastOrNull()?.let { char -> Character.isHighSurrogate(char) } == true })
     }
+
+    @Test
+    fun `reported Alice sentence is bounded at a clause without losing text`() {
+        val text = "but when the Rabbit actually took a watch out of its waistcoat-pocket, and looked at it, " +
+            "and then hurried on, Alice started to her feet, for it flashed across her mind that she had " +
+            "never before seen a rabbit with either a waistcoat-pocket, or a watch to take out of it, " +
+            "and burning with curiosity, she ran across the field after it, and fortunately was just " +
+            "in time to see it pop down a large rabbit-hole under the hedge."
+        val chunks = SystemTtsText.chunks(text, Locale.US)
+        assertEquals(listOf(297, 123), chunks.map { it.length })
+        assertTrue(chunks.first().endsWith("curiosity,"))
+        assertEquals(text, chunks.joinToString(" "))
+    }
 }

@@ -1,177 +1,94 @@
-# 0.6.11 (versionCode 28)
+# 0.6.23 — Background reading setup and production cleanup
 
-Keep active system TTS synthesis running with the screen off:
+- Checks Android's per-app battery-optimization exemption after setup and when the activity resumes. Shows a one-time explanation to non-exempt users, followed by the system confirmation on their explicit action. Declining never blocks TTS or creates a prompt loop.
+- Adds a background-reading card to the experience/status screens. Already-exempt users see confirmation; returning from Settings refreshes the actual state. If the direct dialog is unavailable, falls back to the optimization list, then application settings.
+- Adds REQUEST_IGNORE_BATTERY_OPTIMIZATIONS for the confirmed core-function failure. No WAKE_LOCK or foreground-service permissions are added. No system-wide settings change.
+- Retains the adaptive deadline and single pre-audio retry as safeguards for real failures; preserves cooperative cancellation, memory reclamation, process retirement and low GPU priority.
+- Removes the unused normal-priority option from Android session control. Routine per-request, worker and native memory reports are debug-only. Warnings/errors remain available in release.
+- Replaces stale app version strings with BuildConfig.VERSION_NAME; native build marker is 0.6.23.
 
-- Hold a timeout-limited partial CPU wake lock from the start of a synthesis
-  request until its Android callback and native cleanup finish. Release it
-  on every exit path. The lock does not turn on the screen or cover gaps
-  before the controlling app submits its next request.
-- Log both awake-time `elapsedMs` and deep-sleep-inclusive
-  `elapsedRealtimeMs`. Divergence identifies device suspension.
+Validation:
+- All 15 Kotlin source files compile against Android API 36 and AndroidX/Material API jars, with stand-ins only for Gradle-generated R and BuildConfig. The project still targets its existing compileSdk/targetSdk 37.
+- 30 host regression tests pass (worker lifetime, cancellation, protocol, text splitting and adaptive watchdog).
+- Changed native main, weights and generator translation units pass host C++17 fp16 syntax checks.
+- Manifest and new strings parse; permission is limited to the per-app exemption request.
+- No full Gradle/resource-link/NDK APK build, device UI test or signed release build was available here. Confirm allow/decline/status refresh on the device before publication.
 
-The active service compiles with host Android stubs; native syntax and control
-checks remain passing from 0.6.10. A full Android Gradle build and screen-off
-test are still required. The controlling media app should maintain its own
-background playback lifecycle and wake policy while waiting between items.
+---
 
-# 0.6.10 (versionCode 27)
+# 0.6.22 — Adaptive synthesis watchdog
 
-Bounded scratch-memory recovery for continuous reading:
+- Replaces stepped character deadlines with estimated audio duration (15 characters/second, adjusted for requested speech rate) multiplied by learned real-time factor.
+- Deadline: 3 seconds overhead plus twice expected generation time, bounded to 10–120 seconds. Startup retains its independent timeout.
+- Starts conservatively at RTF 2 until three usable samples. Uses an upper-quartile estimate over the latest nine samples, held for the service lifetime.
+- Measures time to generated PCM, subtracting Android audio callback time; includes small phonemization/transport costs. No native profiling is enabled for release builds.
+- Learns only after successful uncancelled chunks with no recovery in the request. Ignores sub-second audio, invalid samples, deadline-length samples and extreme slowdown outliers.
+- Debug builds report the estimated RTF and chosen deadline.
+- Preserves low GPU priority, existing worker retirement/retry policy and text splitting.
 
-- After a scratch-budget failure, drain queued GPU work and release the
-  generator arena before retrying smaller word-aligned pieces. The 0.6.9
-  retry retained most scratch allocations, so smaller pieces could repeat
-  the same failure and cause long pauses.
-- Do not start another split after three retries or when 20 seconds have
-  elapsed since the first scratch failure. An individual GPU call can still
-  take longer. If recovery cannot finish, return an explicit synthesis
-  error and retire the worker. This limits retry cascades; it cannot make
-  inherently over-budget input synthesize successfully.
-- Normal utterances keep the warm arena and are not split preemptively.
+Validation: five adaptive-watchdog tests pass; modified service compiles against local Android test doubles. Full Android/NDK build and on-device background recovery remain unverified. This change bounds detection; it does not guarantee execution of recovery under device restrictions.
 
-Native syntax and control checks pass. This still needs an Adreno 619
-continuous-reading test to verify behavior under real GPU memory pressure.
+---
 
-# 0.6.9 (versionCode 26)
+# 0.6.21 (versionCode 38) — native worker retirement recovery
 
-Recovery for a scratch-memory safety-budget failure during synthesis:
+Based on 0.6.20. This fixes two concrete recovery defects; it does not claim
+that the original Samsung/long-utterance stall has been reproduced or solved.
+The fixes apply to the shared engine session, including synthesizeToFile().
 
-- Reclaim unused generator arena slots before refusing a new buffer. This
-  limits retained memory from earlier, longer chunks without increasing the
-  768 MiB safety ceiling.
-- If a chunk still exceeds that ceiling, drain queued GPU work and retry it
-  in smaller word-aligned pieces. Ordinary sentences keep their existing
-  prosody and are not split proactively. A chunk with no safe word boundary
-  still fails and reports an Android synthesis error.
-- Native error details and failed chunk numbers remain available in Logcat.
+## Fixes
 
-Native compilation checks and the 12 host session tests pass. Device testing
-remains necessary, especially for sustained reading on Adreno 619.
+- Observe native process exit independently of Process.destroy(). That method
+  can close Java streams and block behind pending pipe I/O. The old single
+  retirement thread could then fail to reach either its exit check or forced
+  termination. Normal termination, exit observation and forced termination
+  now have independent paths. A replacement still requires the old process
+  to have exited; heavy workers are never deliberately overlapped.
+- Recheck actual process liveness before rejecting a replacement because of a
+  previous retirement failure. Previously, an exceptionally completed retirement
+  future stayed attached to the worker. Even a later OS-confirmed exit could
+  leave all subsequent requests failing in the same session.
+- Debug builds mark chunk lengths, Android audio callback entry/return and
+  successful done() entry/return. These markers contain no utterance text and
+  help distinguish native inference stalls from file/output callback stalls.
 
-# 0.6.8 (versionCode 25)
+The existing scratch limits, sentence splitting, low GPU priority, no-audio
+retry policy, voice IDs, speech-rate handling and wake-lock policy are unchanged.
+No foreground service or additional permission has been added.
 
-Reliability update for low-memory devices and stalled native workers:
+## Reported text
 
-- Replacement requests have a five-second worker-retirement deadline. Process
-  exit acknowledges retirement before Java pipe cleanup, so a blocked pipe
-  close cannot leave all subsequent requests waiting without a timeout.
-- Native worker teardown logs its worker ID, reason, exit, or failure. Each synthesis
-  logs completion and elapsed time, and rare native memory high-water markers
-  report uploaded weight bytes and retained generator scratch capacity.
-- An idle worker releases its model after two minutes; Android memory-trim
-  callbacks release it sooner when no request is active. Continuous reading
-  still uses the warm worker.
-- Failed GPU weight preallocation now aborts startup instead of advertising a
-  partially loaded worker as ready.
-- Diagnostic update: native inference errors now include the most recent native
-  error line, command ID and samples already produced. Service logs identify
-  the failed chunk. Android still receives its required error and done callbacks;
-  this update does not claim to resolve an unexplained native inference failure.
+The supplied 421-character Alice/Rabbit sentence is already split by the
+existing system-engine text path into 297 and 123 characters, after
+"curiosity,". It is not passed to one unbounded inference call. A regression
+test preserves the full input and that clause boundary. Native duration/token
+limits can split a command further. This test does not execute Kokoro inference
+or establish that the generated audio is correct on the affected device.
 
-The session's 12 host JVM tests pass, including new stuck-pipe, bounded
-retirement, and idle-release cases. Native control tests and C++ syntax checks
-pass. A full Android Gradle build and Adreno 619 device stress test remain
-necessary; this source change is not proof of a GPU-driver fix.
+## Validation
 
-# 0.6.6 (versionCode 23)
+- Three recovery regressions fail against 0.6.20: blocked destroy after exit,
+  blocked normal destroy preventing force-kill escalation, and a failed
+  retirement poisoning later startup after the old worker eventually exits.
+- All 25 session, protocol and text tests pass against 0.6.21 on the host JVM.
+  Android logging/context/clock are replaced with host test doubles; native
+  workers are simulated. The tests include the no-overlap safety check.
+- Modified session/service Kotlin sources compile with local Android API test
+  doubles. This is a syntax/type check, not Android SDK or APK validation.
+- Full Gradle/NDK/APK build and Samsung device testing have not been performed
+  here. Native inference code is unchanged apart from the build identifier.
 
-Voice names now use the engine's short Kokoro IDs directly (for example,
-`af_heart`), rather than adding an application-specific prefix.
+## Device check
 
-# 0.6.5 (versionCode 22)
+Install the new build and restart the engine service once to clear the old
+in-memory session. Confirm `Service created (0.6.21, worker retirement recovery)`
+in Logcat. Run the same synthesizeToFile sequence, voice and rate, including the
+reported sentence and the following two sentences. Keep the client configuration
+fixed during this comparison. A debug APK can be launched without attaching a
+debugger if diagnostics are needed.
 
-Complete source replacement for the reviewed 0.6.4 (21) archive. Package remains
-`com.labsii.voices`; launcher/system name is SC Kokoro; KokoroVoiceSpec is public.
-All 28 voices, low GPU scheduling priority, rate control and unchanged pitch
-are retained. This ZIP is source, not a signed APK or a Play-ready certification.
-
-## Reliability fixes
-
-- Every native command and response has an ID. Early cancellation survives
-  dequeue; late cancellation cannot affect a replacement command.
-- Android cancellation queues control I/O without waiting on a pipe or a
-  process monitor. A 2.5-second fallback claims only the exact active worker.
-  Worker termination is awaited before starting a replacement.
-- A worker owns its event channel for its entire lifetime. Exits between
-  startup and submission are remembered, and blocked/partial PCM reads do not
-  defeat synthesis timeouts. Diagnostic messages do not fill protocol queues.
-- Native cancellation releases request-local buffers and acknowledges only
-  after queued GPU work completes. Live generator blocks are cancellation
-  boundaries; whole-graph recording is disabled for the system engine because
-  it cannot observe cancellation inside the recorded graph.
-- Unused FP32 scratch buffers are absent from the default half-math path.
-  Cached weights no longer borrow scratch-arena slots. Scratch retention is
-  capped at the smaller of 768 MiB and one third of reported device memory.
-  This is not a cap on all process memory and not a measured RAM reduction.
-- Inputs exceeding 512 phoneme tokens split at word boundaries. Exceptionally
-  long predicted speech (over 600 alignment frames, approximately 15 seconds)
-  splits before generator allocation, including at slower requested rates.
-  Ordinary sentence splitting and pitch are unchanged.
-- A failed real duration predictor no longer falls back to dummy durations.
-  Failed kernel launches, critical argument/transfer operations, readbacks,
-  non-finite output and terminal native errors cannot masquerade as success.
-- The input-control thread is joinable and has bounded, validated input.
-
-## Installation and compatibility
-
-- UI and voice discovery use the same per-file SHA-256 verification receipts.
-  Existing files without receipts are hashed, not trusted merely by length.
-- Newly promoted voices always trigger a voice-data notification. Resumed
-  downloads still verify size/hash; oversized responses are rejected.
-- Packaged kernels/vocabulary refresh by app-install generation. The Gradle
-  staging task tracks whole output directories, including kernels and the loader.
-- Builds no longer pull OpenCL from a connected phone. A neutral shared loader
-  resolves vendor OpenCL on the running device without shipping vendor binaries.
-- Candidate selection checks errors, prefers GPU devices, tries available FP16
-  candidates, and tests a real FP16 dispatch/readback. Adreno is not required.
-- Other/unknown hardware receives an experimental warning and a real, silent
-  TTS-service synthesis test after installation. No extra inference process is
-  used for that test. Installed voices remain available if the test is interrupted.
-- Onboarding completion persists; Material UI hardware acceleration is enabled.
-- Profiling queues and GPU weight-roundtrip diagnostics are off in normal use.
-
-## Validation and remaining release checks
-
-The source has been checked with a complete Release/fp16 host CMake build and
-link against CLBlast 1.6.3 and eSpeak NG 1.52.0. All Kotlin production/test sources
-are compiled against Android API 35 classes with Kotlin 2.2.0 and Material 1.13.0;
-only generated resource IDs and Android logging are replaced in host testing.
-The project's requested AGP/Kotlin/SDK/Gradle versions are preserved.
-
-All 15 JVM regression tests pass. These cover normal repeated requests, warm cancellation,
-cancellation before startup, stale watchdog ownership, blocked input,
-truncated PCM, early worker exit, voice switching without worker overlap,
-partial-audio failure, framing, file integrity and sentence splitting.
-Native tests cover command parsing, early/late cancellation, buffer ownership,
-and reader-thread shutdown without stdin EOF.
-
-No Android SDK/NDK or physical GPU is available in this validation environment.
-A complete Android Gradle APK/AAB build, real-driver synthesis quality,
-memory/thermal behavior and device cancellation latency are not verified here.
-No real-time performance claim is made for this revision.
-
-Before shipping, run on your representative devices without a debugger:
-
-1. Upgrade with existing models; open the app once; verify all 28 voices return.
-2. Read at least 30 varied sentences at 0.5x, 1x and 2x. Listen for audio regressions.
-3. Repeatedly stop buffered speech and immediately request replacement speech.
-   The replacement must finish, with no overlapping native workers.
-4. Change voices while speaking; switch between this engine and another engine.
-5. Leave a continuous reading session running for 15 minutes; inspect memory,
-   responsiveness and sustained throughput, not only the first utterance.
-6. Test the new driver loader on each vendor/device family you intend to support.
-7. Build/sign an AAB and verify release permissions, native 16-KiB alignment,
-   your privacy-policy URL and the exact corresponding-source publication.
-
-Run JVM tests with `cd android && ./gradlew :app:testDebugUnitTest`.
-Run native control tests with `bash scripts/test_native_control.sh` after
-`scripts/setup_deps.sh` (host C++17 compiler required).
-# 0.6.7 (versionCode 24)
-
-Release preparation on the user's updated AGP 9.4.1 / Gradle baseline: source
-directories use the built-in Kotlin source-set API; release builds enable R8
-code and resource shrinking and allow native symbols to be stripped from the
-packaged libraries. Ignore rules cover generated native/runtime outputs, local SDK paths,
-IDE files and signing secrets. The README documents Play upload signing. This
-source ZIP deliberately excludes build products, staged libraries and machine
-configuration. A signed release build and device validation are still required.
+If it stalls again, the final `KOKORO_CHUNK`, `KOKORO_STAGE`, `KOKORO_CALLBACK`
+and `KOKORO_DEADLINE`/retirement lines identify the last reached phase. Audio
+callback return does not prove client playback or receipt of its onDone callback.
+An engine whose entire process is suspended, or whose driver cannot terminate
+its native worker, cannot guarantee recovery through these Java threads.

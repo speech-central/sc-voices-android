@@ -6,8 +6,13 @@
  */
 package com.labsii.voices.system
 
+import android.content.BroadcastReceiver
 import android.content.ComponentCallbacks2
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioFormat
+import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import android.speech.tts.SynthesisCallback
@@ -16,9 +21,11 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeechService
 import android.speech.tts.Voice
 import android.util.Log
+import com.labsii.voices.BuildConfig
 import com.labsii.voices.runner.KokoroModelManager
 import com.labsii.voices.runner.KokoroSession
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
 import java.util.Locale
 import java.util.concurrent.locks.ReentrantLock
@@ -27,7 +34,14 @@ import java.util.concurrent.locks.ReentrantLock
 class AdrenoTtsService : TextToSpeechService() {
     private lateinit var catalog: InstalledKokoroVoiceCatalog
     private lateinit var session: KokoroSession
-    private lateinit var synthesisWakeLock: PowerManager.WakeLock
+    private val synthesisWatchdog = SynthesisWatchdog()
+    private lateinit var powerManager: PowerManager
+    private var powerReceiverRegistered = false
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            logPowerState(intent.action ?: "unknown", activeRequest?.id)
+        }
+    }
     /**
      * Android can create a replacement TTS client while the previous request is
      * still being cancelled.  A single mutable `cancelled` Boolean makes those
@@ -42,16 +56,37 @@ class AdrenoTtsService : TextToSpeechService() {
     override fun onCreate() {
         // TextToSpeechService.onCreate() synchronously calls onLoadLanguage().
         catalog = InstalledKokoroVoiceCatalog(applicationContext)
-        session = KokoroSession(applicationContext)
-        synthesisWakeLock = getSystemService(PowerManager::class.java)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:KokoroSynthesis")
-            .apply { setReferenceCounted(false) }
-        Log.i(
+        session = KokoroSession(applicationContext, diagnosticsEnabled = BuildConfig.DEBUG)
+        powerManager = getSystemService(PowerManager::class.java)
+        if (BuildConfig.DEBUG) Log.i(
             TAG,
-            "Service created (0.6.11, request-scoped protocol v2); installed voices=${catalog.installed().size}, " +
+            "Service created (${BuildConfig.VERSION_NAME}, background reading exemption); installed voices=${catalog.installed().size}, " +
                 "runtimeReady=${KokoroModelManager.isRuntimeReady(applicationContext)}",
         )
         super.onCreate()
+        if (BuildConfig.DEBUG) {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+                addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    addAction(PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED)
+                }
+            }
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    registerReceiver(powerReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    @Suppress("DEPRECATION")
+                    registerReceiver(powerReceiver, filter)
+                }
+                powerReceiverRegistered = true
+            }.onFailure {
+                Log.w(TAG, "KOKORO_POWER receiver unavailable: ${it.javaClass.simpleName}")
+            }
+            logPowerState("service_created", null)
+        }
     }
 
     override fun onGetLanguage(): Array<String> = legacyLanguage(catalog.preferred()?.locale)
@@ -70,7 +105,7 @@ class AdrenoTtsService : TextToSpeechService() {
 
     override fun onGetVoices(): MutableList<Voice> {
         val installed = catalog.installed()
-        Log.i(TAG, "Android requested voices; returning ${installed.size}")
+        if (BuildConfig.DEBUG) Log.i(TAG, "Android requested voices; returning ${installed.size}")
         return installed.mapTo(mutableListOf()) { voice ->
             Voice(
                 voice.voiceName,
@@ -92,29 +127,58 @@ class AdrenoTtsService : TextToSpeechService() {
     override fun onLoadVoice(voiceName: String?): Int = onIsValidVoiceName(voiceName)
 
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
+        val enteredRealMs = if (BuildConfig.DEBUG) SystemClock.elapsedRealtime() else 0L
+        if (BuildConfig.DEBUG) {
+            Log.i(TAG, "KOKORO_DISPATCH event=entered elapsedRealtimeMs=$enteredRealMs " +
+                "uptimeMs=${SystemClock.uptimeMillis()} lockHeld=${synthesisLock.isLocked}")
+        }
         synthesisLock.lock()
-        val startedAt = System.nanoTime()
-        val startedRealMs = SystemClock.elapsedRealtime()
-        var wakeLockAcquired = false
+        if (BuildConfig.DEBUG) {
+            Log.i(TAG, "KOKORO_DISPATCH event=acquired waitMs=${SystemClock.elapsedRealtime() - enteredRealMs}")
+        }
+        val startedAt = if (BuildConfig.DEBUG) System.nanoTime() else 0L
+        val startedRealMs = if (BuildConfig.DEBUG) SystemClock.elapsedRealtime() else 0L
         var state: KokoroSession.Request? = null
         var callbackStarted = false
         var callbackFinished = false
         var chunkIndex = 0
         var chunkCount = 0
+        val debug = if (BuildConfig.DEBUG) KokoroSession.DebugTiming() else null
+        var textChars = 0
+        var startupAwakeNs = 0L
+        var startupElapsedMs = 0L
+        var speakAwakeNs = 0L
+        var speakElapsedMs = 0L
+        var callbackAwakeNs = 0L
+        var callbackElapsedMs = 0L
+        var callbackSamples = 0L
         try {
-            // File synthesis may have no active Media3 player in the client.
-            // Keep the CPU awake only while this request is actually running.
-            synthesisWakeLock.acquire(SYNTHESIS_WAKE_LOCK_TIMEOUT_MS)
-            wakeLockAcquired = true
+            val requestStageMs = if (BuildConfig.DEBUG) SystemClock.elapsedRealtime() else 0L
+            if (BuildConfig.DEBUG) Log.i(TAG, "KOKORO_PREP stage=begin_request elapsedRealtimeMs=$requestStageMs")
             val current = session.beginRequest()
             state = current
             activeRequest = current
+            val voiceStageMs = if (BuildConfig.DEBUG) SystemClock.elapsedRealtime() else 0L
+            if (BuildConfig.DEBUG) {
+                Log.i(TAG, "KOKORO_PREP stage=request_created id=${current.id} " +
+                    "requestMs=${voiceStageMs - requestStageMs} elapsedRealtimeMs=$voiceStageMs")
+            }
             val voice = catalog.findByVoiceName(request.voiceName)
                 ?: catalog.findForLanguage(request.language, request.country)
                 ?: throw IllegalStateException("Kokoro is not installed or does not support ${request.language}")
-            Log.i(TAG, "Synthesis begin id=${current.id}, voice=${voice.voiceName}")
+            if (BuildConfig.DEBUG) {
+                Log.i(TAG, "KOKORO_PREP stage=voice_resolved id=${current.id} " +
+                    "lookupMs=${SystemClock.elapsedRealtime() - voiceStageMs}")
+            }
+            if (BuildConfig.DEBUG) Log.i(TAG, "Synthesis begin id=${current.id}, voice=${voice.voiceName}")
+            logPowerState("request_begin", current.id)
             val chunks = SystemTtsText.chunks(request.charSequenceText ?: "", voice.locale)
             chunkCount = chunks.size
+            if (debug != null) {
+                textChars = chunks.sumOf { it.length }
+                Log.i(TAG, "KOKORO_PREP stage=text_prepared id=${current.id} " +
+                    "chunkChars=${chunks.joinToString(",") { it.length.toString() }}")
+            }
             val speechRate = request.speechRate
                 .takeIf { it > 0 }
                 ?.div(100.0f)
@@ -133,33 +197,101 @@ class AdrenoTtsService : TextToSpeechService() {
                 return
             }
 
-            runBlocking(Dispatchers.IO) {
-                session.start(current, voice.voicePackPath, voice.phonemizerVoice)
+            val startupStartedNs = if (debug != null) System.nanoTime() else 0L
+            val startupStartedRealMs = if (debug != null) SystemClock.elapsedRealtime() else 0L
+            try {
+                runBlocking(Dispatchers.IO) {
+                    session.start(current, voice.voicePackPath, voice.phonemizerVoice,
+                        KokoroSession.GpuPriority.LOW)
+                }
+            } finally {
+                if (debug != null) {
+                    startupAwakeNs += System.nanoTime() - startupStartedNs
+                    startupElapsedMs += SystemClock.elapsedRealtime() - startupStartedRealMs
+                }
             }
+            var recoveryAttempted = false
             for (chunk in chunks) {
                 chunkIndex++
                 if (current.cancelled.get()) return
+                if (debug != null) Log.i(TAG, "KOKORO_CHUNK event=begin id=${current.id} " +
+                    "chunk=$chunkIndex/$chunkCount chars=${chunk.length}")
                 // PCM arrives asynchronously; callbacks remain on Android's
                 // dedicated synthesis thread, never the reader/control threads.
-                runBlocking {
-                    session.speak(current, chunk, speechRate) { result ->
-                        if (result.sampleRate != SAMPLE_RATE) {
-                            throw IllegalStateException("Unexpected Kokoro sample rate ${result.sampleRate}")
-                        }
-                        if (!current.cancelled.get()) {
+                val speakStartedNs = if (debug != null) System.nanoTime() else 0L
+                val speakStartedRealMs = if (debug != null) SystemClock.elapsedRealtime() else 0L
+                var chunkDelivered = false
+                var measuredAudioMs = 0.0
+                var measuredGenerationMs = 0L
+                var generationStartedMs = SystemClock.elapsedRealtime()
+                val deliver: (KokoroSession.PcmAudio) -> Unit = { result ->
+                    val audioArrivedMs = SystemClock.elapsedRealtime()
+                    measuredGenerationMs += audioArrivedMs - generationStartedMs
+                    measuredAudioMs += result.samples.size * 1000.0 / result.sampleRate
+                    if (result.sampleRate != SAMPLE_RATE) {
+                        throw IllegalStateException("Unexpected Kokoro sample rate ${result.sampleRate}")
+                    }
+                    if (!current.cancelled.get()) {
+                        // Mark before entering a possibly blocking callback. Once
+                        // any audio can reach Android, replay could duplicate it.
+                        chunkDelivered = true
+                        if (debug == null) {
                             streamPcm(result.samples, callback) { current.cancelled.get() }
+                        } else {
+                            val callbackStartedNs = System.nanoTime()
+                            val callbackStartedRealMs = SystemClock.elapsedRealtime()
+                            Log.i(TAG, "KOKORO_CALLBACK event=audio_begin id=${current.id} " +
+                                "chunk=$chunkIndex/$chunkCount samples=${result.samples.size}")
+                            try {
+                                callbackSamples += streamPcm(result.samples, callback) { current.cancelled.get() }
+                            } finally {
+                                callbackAwakeNs += System.nanoTime() - callbackStartedNs
+                                callbackElapsedMs += SystemClock.elapsedRealtime() - callbackStartedRealMs
+                                Log.i(TAG, "KOKORO_CALLBACK event=audio_end id=${current.id} " +
+                                    "chunk=$chunkIndex/$chunkCount")
+                            }
                         }
                     }
+                    generationStartedMs = SystemClock.elapsedRealtime()
+                }
+                val timeoutMs = synthesisWatchdog.timeoutMs(chunk.length, speechRate)
+                if (debug != null) Log.i(TAG, "KOKORO_WATCHDOG id=${current.id} " +
+                    "chars=${chunk.length} rtf=${synthesisWatchdog.estimatedRtf} timeoutMs=$timeoutMs")
+                try {
+                    try {
+                        runBlocking { session.speak(current, chunk, speechRate, debug, timeoutMs, deliver) }
+                    } catch (stalled: KokoroSession.InferenceDeadlineException) {
+                        if (recoveryAttempted || chunkDelivered || current.cancelled.get()) throw stalled
+                        recoveryAttempted = true
+                        Log.w(TAG, "Kokoro inference deadline id=${current.id}, chunk=$chunkIndex/$chunkCount; " +
+                            "retiring worker and retrying once at low GPU priority")
+                        runBlocking(Dispatchers.IO) {
+                            session.start(current, voice.voicePackPath, voice.phonemizerVoice,
+                                KokoroSession.GpuPriority.LOW)
+                        }
+                        if (current.cancelled.get()) return
+                        runBlocking { session.speak(current, chunk, speechRate, debug, timeoutMs, deliver) }
+                    }
+                } finally {
+                    if (debug != null) {
+                        speakAwakeNs += System.nanoTime() - speakStartedNs
+                        speakElapsedMs += SystemClock.elapsedRealtime() - speakStartedRealMs
+                    }
+                }
+                if (!current.cancelled.get() && !recoveryAttempted) {
+                    synthesisWatchdog.record(measuredGenerationMs, measuredAudioMs, timeoutMs)
                 }
                 if (current.cancelled.get()) {
-                    Log.i(TAG, "Cancelled native utterance drained; preserving warm session")
+                    if (BuildConfig.DEBUG) Log.i(TAG, "Cancelled native utterance drained; preserving warm session")
                     return
                 }
             }
 
             if (!current.cancelled.get()) {
+                if (debug != null) Log.i(TAG, "KOKORO_CALLBACK event=done_begin id=${current.id}")
                 callback.done()
                 callbackFinished = true
+                if (debug != null) Log.i(TAG, "KOKORO_CALLBACK event=done_end id=${current.id}")
             }
         } catch (t: Throwable) {
             // A timeout, dead pipe, or rejected chunk can leave the framed
@@ -175,25 +307,37 @@ class AdrenoTtsService : TextToSpeechService() {
             }
         } finally {
             if (callbackStarted && !callbackFinished && state?.cancelled?.get() != true) callback.done()
-            Log.i(TAG, "Synthesis finished id=${state?.id}, cancelled=${state?.cancelled?.get() == true}, " +
+            if (BuildConfig.DEBUG) Log.i(TAG, "Synthesis finished id=${state?.id}, cancelled=${state?.cancelled?.get() == true}, " +
                 "elapsedMs=${(System.nanoTime() - startedAt) / 1_000_000}, " +
                 "elapsedRealtimeMs=${SystemClock.elapsedRealtime() - startedRealMs}")
+            if (debug != null) {
+                val totalAwakeMs = (System.nanoTime() - startedAt) / 1_000_000
+                val totalElapsedMs = SystemClock.elapsedRealtime() - startedRealMs
+                Log.i(TAG, "KOKORO_TIMING id=${state?.id} chunks=$chunkIndex/$chunkCount chars=$textChars " +
+                    "startup=${startupAwakeNs / 1_000_000}/${startupElapsedMs}ms " +
+                    "speak=${speakAwakeNs / 1_000_000}/${speakElapsedMs}ms " +
+                    "g2p=${debug.phonemizeNs.get() / 1_000_000}ms " +
+                    "inference=${debug.inferenceNs.get() / 1_000_000}ms " +
+                    "pipeWrite=${debug.nativeWriteNs.get() / 1_000_000}ms " +
+                    "pipeRead=${debug.pcmReadNs.get() / 1_000_000}ms " +
+                    "callback=${callbackAwakeNs / 1_000_000}/${callbackElapsedMs}ms " +
+                    "audio=${callbackSamples * 1000 / SAMPLE_RATE}ms " +
+                    "total=$totalAwakeMs/${totalElapsedMs}ms " +
+                    "suspendGap=${totalElapsedMs - totalAwakeMs}ms engineWakeLock=disabled")
+            }
+            logPowerState("request_end", state?.id)
             state?.let { session.finishRequest(it) }
             if (activeRequest === state) {
                 activeRequest = null
             }
-            try {
-                if (wakeLockAcquired && synthesisWakeLock.isHeld) synthesisWakeLock.release()
-            } finally {
-                synthesisLock.unlock()
-            }
+            synthesisLock.unlock()
         }
     }
 
     override fun onStop() {
         val state = activeRequest
         state?.cancelled?.set(true)
-        Log.i(TAG, "Synthesis stop requested; active=${state != null}, id=${state?.id}")
+        if (BuildConfig.DEBUG) Log.i(TAG, "Synthesis stop requested; active=${state != null}, id=${state?.id}")
         if (state != null && ::session.isInitialized) {
             // Request cancellation from a separate native stdin reader. The
             // graph checks it between safe GPU stages and keeps the warm model
@@ -204,6 +348,10 @@ class AdrenoTtsService : TextToSpeechService() {
     }
 
     override fun onDestroy() {
+        if (powerReceiverRegistered) {
+            unregisterReceiver(powerReceiver)
+            powerReceiverRegistered = false
+        }
         activeRequest?.cancelled?.set(true)
         if (::session.isInitialized) session.close()
         super.onDestroy()
@@ -221,13 +369,13 @@ class AdrenoTtsService : TextToSpeechService() {
         pcm: ShortArray,
         callback: SynthesisCallback,
         isCancelled: () -> Boolean,
-    ) {
+    ): Int {
         val maxBytes = (callback.maxBufferSize.takeIf { it >= 2 } ?: DEFAULT_CALLBACK_BUFFER_BYTES)
             .let { it - (it % 2) }
         val buffer = ByteArray(maxBytes)
         var sampleOffset = 0
         while (sampleOffset < pcm.size) {
-            if (isCancelled()) return
+            if (isCancelled()) return sampleOffset
             val count = minOf(buffer.size / 2, pcm.size - sampleOffset)
             for (index in 0 until count) {
                 val sample = pcm[sampleOffset + index].toInt()
@@ -238,11 +386,36 @@ class AdrenoTtsService : TextToSpeechService() {
             if (callback.audioAvailable(buffer, 0, byteCount) != TextToSpeech.SUCCESS) {
                 // Android may invalidate the callback concurrently with
                 // onStop(). That is a normal cancellation, not a stream error.
-                if (isCancelled()) return
+                if (isCancelled()) return sampleOffset
                 throw IllegalStateException("TTS client rejected a Kokoro audio chunk")
             }
             sampleOffset += count
         }
+        return sampleOffset
+    }
+
+    /** Debug-only device power observations. */
+    private fun logPowerState(event: String, requestId: Long?) {
+        if (!BuildConfig.DEBUG || !::powerManager.isInitialized) return
+        // A diagnostic must never turn an otherwise successful synthesis into an error.
+        val details = runCatching {
+            val standby = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                powerManager.isLowPowerStandbyEnabled.toString()
+            } else "unsupported"
+            val standbyExempt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                powerManager.isExemptFromLowPowerStandby.toString()
+            } else "unsupported"
+            val lightIdle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                powerManager.isDeviceLightIdleMode.toString()
+            } else "unsupported"
+            "engineWakeLock=disabled interactive=${powerManager.isInteractive} " +
+                "batterySaver=${powerManager.isPowerSaveMode} " +
+                "deviceIdle=${powerManager.isDeviceIdleMode} lightIdle=$lightIdle " +
+                "lowPowerStandby=$standby standbyExempt=$standbyExempt " +
+                "batteryOptimizationExempt=${powerManager.isIgnoringBatteryOptimizations(packageName)} " +
+                "elapsedRealtimeMs=${SystemClock.elapsedRealtime()} uptimeMs=${SystemClock.uptimeMillis()}"
+        }.getOrElse { "probeError=${it.javaClass.simpleName}" }
+        Log.i(TAG, "KOKORO_POWER event=$event id=$requestId $details")
     }
 
     private fun legacyLanguage(locale: Locale?): Array<String> {
@@ -259,6 +432,5 @@ class AdrenoTtsService : TextToSpeechService() {
         private const val DEFAULT_SPEECH_RATE = 1.0f
         private const val MIN_SPEECH_RATE = 0.5f
         private const val MAX_SPEECH_RATE = 2.0f
-        private const val SYNTHESIS_WAKE_LOCK_TIMEOUT_MS = 5 * 60_000L
     }
 }

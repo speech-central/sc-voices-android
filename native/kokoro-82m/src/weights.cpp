@@ -415,8 +415,11 @@ bool Weights::pre_allocate_all() {
     double s = std::chrono::duration<double>(t1 - t0).count();
     NNOPT_CHECKPOINT_FMT("weights: pre-allocated %zu GPU buffers (%zu already present) in %.3fs",
                          created, skipped_present, s);
-    std::fprintf(stderr, "KOKORO_MEMORY weight_buffers_bytes=%zu buffers=%zu\n", bytes, created + skipped_present);
-    std::fflush(stderr);
+    const char* diagnostics = std::getenv("NNOPT_DIAGNOSTICS");
+    if (diagnostics && diagnostics[0] == '1') {
+        std::fprintf(stderr, "KOKORO_MEMORY weight_buffers_bytes=%zu buffers=%zu\n", bytes, created + skipped_present);
+        std::fflush(stderr);
+    }
     return true;
 }
 

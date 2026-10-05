@@ -5,18 +5,25 @@
  */
 package com.labsii.voices
 
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.Dialog
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.labsii.voices.runner.KokoroDeviceProbe
 import com.labsii.voices.runner.KokoroModelManager
@@ -55,6 +62,10 @@ class MainActivity : Activity() {
     private var onboardingComplete = false
     private var selfTestPassed = false
     private var needsSelfTest = false
+    private val backgroundReadingCards = mutableListOf<Pair<TextView, MaterialButton>>()
+    private var backgroundDialog: Dialog? = null
+    private var activityResumed = false
+    private var showingInstalledScreen = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,7 +89,20 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onPostResume() {
+        super.onPostResume()
+        activityResumed = true
+        refreshBackgroundReading()
+    }
+
+    override fun onPause() {
+        activityResumed = false
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        backgroundDialog?.dismiss()
+        backgroundDialog = null
         scope.cancel()
         super.onDestroy()
     }
@@ -168,6 +192,7 @@ class MainActivity : Activity() {
             cardContent.addView(experienceDetailView, matchParams(top = 12))
         })
 
+        addView(backgroundReadingCard(), matchParams(top = 16))
         addView(speechCentralCard(), matchParams(top = 16))
         addView(primaryButton("Continue").apply {
             setOnClickListener {
@@ -185,6 +210,7 @@ class MainActivity : Activity() {
                 "All 28 English voices are installed. SC Kokoro is ready to use as an Android text-to-speech engine.",
             ))
         })
+        addView(backgroundReadingCard(), matchParams(top = 16))
         addView(speechCentralCard(), matchParams(top = 16))
         addView(outlinedButton("Credits and licenses").apply {
             setOnClickListener { startActivity(Intent(this@MainActivity, CreditsActivity::class.java)) }
@@ -199,6 +225,85 @@ class MainActivity : Activity() {
         cardContent.addView(primaryButton("Get Speech Central").apply {
             setOnClickListener { openSpeechCentral() }
         }, matchParams(top = 20))
+    }
+
+    private fun backgroundReadingCard(): MaterialCardView = card { content ->
+        content.addView(sectionTitle(getString(R.string.background_reading_title)))
+        val status = bodyText("")
+        val button = primaryButton(getString(R.string.background_reading_allow)).apply {
+            setOnClickListener { requestBackgroundReading() }
+        }
+        content.addView(status)
+        content.addView(button, matchParams(top = 20))
+        backgroundReadingCards.add(status to button)
+    }
+
+    private fun batteryExempt(): Boolean? = runCatching {
+        getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(packageName)
+    }.getOrNull()
+
+    private fun refreshBackgroundReading() {
+        val exempt = batteryExempt()
+        for ((status, button) in backgroundReadingCards) {
+            status.setText(when (exempt) {
+                true -> R.string.background_reading_enabled
+                false -> R.string.background_reading_explanation
+                null -> R.string.background_reading_unknown
+            })
+            button.visibility = if (exempt == true) View.GONE else View.VISIBLE
+        }
+        if (exempt == true) {
+            backgroundDialog?.dismiss()
+            // Already-exempt installations need no automatic prompt either.
+            if (!preferences.getBoolean(BACKGROUND_PROMPT_SHOWN, false)) {
+                preferences.edit { putBoolean(BACKGROUND_PROMPT_SHOWN, true) }
+            }
+            return
+        }
+        if (exempt != false || !activityResumed || !showingInstalledScreen ||
+            isFinishing || isDestroyed || backgroundDialog != null ||
+            preferences.getBoolean(BACKGROUND_PROMPT_SHOWN, false)) return
+
+        // Persist before showing: returning from Settings, rotation or declining
+        // must never cause a prompt loop. The card always permits a later retry.
+        preferences.edit { putBoolean(BACKGROUND_PROMPT_SHOWN, true) }
+        backgroundDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.background_reading_title)
+            .setMessage(R.string.background_reading_explanation)
+            .setPositiveButton(R.string.background_reading_allow) { _, _ -> requestBackgroundReading() }
+            .setNegativeButton(R.string.background_reading_later, null)
+            .setOnDismissListener { backgroundDialog = null }
+            .show()
+    }
+
+    @SuppressLint("BatteryLife") // Core offline synthesis stalls under idle restrictions on affected devices.
+    private fun requestBackgroundReading() {
+        preferences.edit { putBoolean(BACKGROUND_PROMPT_SHOWN, true) }
+        if (batteryExempt() == true) {
+            refreshBackgroundReading()
+            return
+        }
+        val packageUri = Uri.parse("package:$packageName")
+        val intents = listOf(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, packageUri),
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri),
+        )
+        for ((index, intent) in intents.withIndex()) {
+            try {
+                startActivity(intent)
+                if (index > 0) Toast.makeText(this,
+                    R.string.background_reading_manual, Toast.LENGTH_LONG).show()
+                // The setting is queried again on return; a successful launch
+                // or activity result does not mean the user granted exemption.
+                return
+            } catch (_: ActivityNotFoundException) {
+                // Some device builds expose only the general battery screen.
+            } catch (_: SecurityException) {
+                // Managed devices may disallow the direct request.
+            }
+        }
+        Toast.makeText(this, R.string.background_reading_manual, Toast.LENGTH_LONG).show()
     }
 
     private fun renderDeviceExperience(renderer: String?) {
@@ -358,10 +463,12 @@ class MainActivity : Activity() {
         downloadScreen.visibility = if (screen === downloadScreen) View.VISIBLE else View.GONE
         experienceScreen.visibility = if (screen === experienceScreen) View.VISIBLE else View.GONE
         readyScreen.visibility = if (screen === readyScreen) View.VISIBLE else View.GONE
+        showingInstalledScreen = screen === readyScreen || screen === experienceScreen
+        refreshBackgroundReading()
     }
 
     private fun testGeneration(): String =
-        "0.6.11:${packageManager.getPackageInfo(packageName, 0).lastUpdateTime}:$detectedRenderer"
+        "${BuildConfig.VERSION_NAME}:${packageManager.getPackageInfo(packageName, 0).lastUpdateTime}:$detectedRenderer"
 
     private fun openSpeechCentral() {
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SPEECH_CENTRAL_URL)))
@@ -432,6 +539,7 @@ class MainActivity : Activity() {
         if (this % 1.0 == 0.0) toInt().toString() else toString()
 
     private companion object {
+        const val BACKGROUND_PROMPT_SHOWN = "background_reading_prompt_shown"
         const val SPEECH_CENTRAL_URL =
             "https://play.google.com/store/apps/details?id=com.labsiisoftware.speechcentral"
     }

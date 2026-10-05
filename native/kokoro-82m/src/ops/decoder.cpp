@@ -2212,7 +2212,12 @@ extern "C" int op_decoder(OpenCLContext& cl_ctx, Weights& weights, cl_command_qu
     auto tracked_buffer = [&](cl_context ctx, cl_mem_flags flags, size_t bytes, void* data, cl_int* err) {
         return owned.own(::clCreateBuffer(ctx, flags, bytes, data, err));
     };
-    #define TTS_DEC_CANCEL_POINT() do { const int checkpoint = nnopt_tts_gpu_checkpoint(queue); if (checkpoint) return checkpoint; } while (0)
+    #define TTS_DEC_CANCEL_POINT() do { \
+        nnopt_tts_stage("decoder_checkpoint_begin line=%d", __LINE__); \
+        const int checkpoint = nnopt_tts_gpu_checkpoint(queue); \
+        nnopt_tts_stage("decoder_checkpoint_end line=%d rc=%d", __LINE__, checkpoint); \
+        if (checkpoint) return checkpoint; \
+    } while (0)
     if (!ensure_built(cl_ctx)) return -1;
     const int n_fft = 20, hop = 5;
     const int upsample_to_audio = 60; // total post-iSTFT upsample factor (excluding iSTFT's own hop)
@@ -2380,8 +2385,10 @@ extern "C" int op_decoder(OpenCLContext& cl_ctx, Weights& weights, cl_command_qu
             if (fg[0] == '1') {
                 DEC_TICK("post-decode setup before gpu_fp32 call");
                 TTS_DEC_CANCEL_POINT();
+                nnopt_tts_stage("generator_begin");
                 int rc = op_decoder_gpu_fp32(cl_ctx, weights, queue, gx_e, F0_pred, N_pred, ref_s_dec,
                                               gT_e, T_frames, out_pcm_int16);
+                nnopt_tts_stage("generator_end");
                 DEC_TICK("op_decoder_gpu_fp32 returned");
                 for (cl_mem m : {F0, N, asr_res, F0_up, N_up, F0N, x, x_enc}) if (m) owned.release(m);
                 DEC_TICK("buffer releases done");

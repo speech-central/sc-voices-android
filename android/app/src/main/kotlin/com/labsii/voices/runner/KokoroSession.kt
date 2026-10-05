@@ -7,7 +7,9 @@ package com.labsii.voices.runner
 
 import android.content.Context
 import android.util.Log
+import android.os.SystemClock
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
@@ -40,9 +42,16 @@ class KokoroSession internal constructor(
     },
     private val retirementTimeoutMs: Long = RETIREMENT_TIMEOUT_MS,
     private val idleTimeoutMs: Long = IDLE_TIMEOUT_MS,
+    private val diagnosticsEnabled: Boolean = false,
 ) {
-    constructor(context: Context) : this(
+    enum class GpuPriority(val setting: String) {
+        LOW("low"),
+    }
+    class InferenceDeadlineException(message: String) : IOException(message)
+
+    constructor(context: Context, diagnosticsEnabled: Boolean = false) : this(
         context.applicationInfo.nativeLibraryDir, KokoroModelManager.runtimeDir(context),
+        diagnosticsEnabled = diagnosticsEnabled,
     )
     private val lock = Any()
     private var worker: Worker? = null
@@ -55,6 +64,25 @@ class KokoroSession internal constructor(
     class Request internal constructor(val id: Long) {
         val cancelled = AtomicBoolean()
         internal var fallback: ScheduledFuture<*>? = null
+    }
+    /** Debug-only counters; no native timing or per-buffer clocks in release. */
+    class DebugTiming {
+        val phonemizeNs = AtomicLong()
+        val inferenceNs = AtomicLong()
+        val nativeWriteNs = AtomicLong()
+        val pcmReadNs = AtomicLong()
+        val nativeSamples = AtomicLong()
+
+        internal fun acceptNative(line: String, commandId: Long?) {
+            val fields = line.split(' ')
+            if (fields.size != 6 || fields[1].toLongOrNull() != commandId) return
+            val values = fields.drop(2).map { it.toLongOrNull() ?: return }
+            if (values.any { it < 0 }) return
+            phonemizeNs.addAndGet(values[0])
+            inferenceNs.addAndGet(values[1])
+            nativeWriteNs.addAndGet(values[2])
+            nativeSamples.addAndGet(values[3])
+        }
     }
     data class PcmAudio(val samples: ShortArray, val sampleRate: Int) {
         override fun equals(other: Any?): Boolean {
@@ -88,6 +116,9 @@ class KokoroSession internal constructor(
         val retiring = AtomicBoolean()
         val retired = CompletableDeferred<Unit>()
         val lastNativeError = AtomicReference<String?>(null)
+        val lastNativeStage = AtomicReference<String?>(null)
+        val debugTiming = AtomicReference<DebugTiming?>(null)
+        val debugCommandId = AtomicLong()
         var commandId: Long? = null // protected by the session lock
     }
 
@@ -122,12 +153,15 @@ class KokoroSession internal constructor(
         Unit
     }
 
-    suspend fun start(request: Request, voicePackPath: String, phonemizerVoice: String) =
+    suspend fun start(
+        request: Request, voicePackPath: String, phonemizerVoice: String,
+        priority: GpuPriority = GpuPriority.LOW,
+    ) =
         withContext(Dispatchers.IO) {
             // A repaired file must not reuse a worker holding the old contents.
             val voiceKey = "$voicePackPath|$phonemizerVoice|" +
                 "${File(cwd, voicePackPath).lastModified()}|" +
-                "${File(cwd, "weights/model.fp16.bin").lastModified()}"
+                "${File(cwd, "weights/model.fp16.bin").lastModified()}|${priority.setting}"
             val previous = synchronized(lock) {
                 check(active === request && !closed)
                 worker
@@ -142,13 +176,22 @@ class KokoroSession internal constructor(
             }
             // Failed retirement prevents spawning overlapping heavy workers.
             if (previous != null) {
+                val retirement = retire(previous, "voice change or dead worker")
                 try {
-                    withTimeout(retirementTimeoutMs.milliseconds) {
-                        retire(previous, "voice change or dead worker").await()
+                    // A past failed retirement is not permanent session state:
+                    // the OS may have completed the exit since that failure.
+                    // Actual process exit, not pipe cleanup or a cached future,
+                    // is the safety gate for a replacement.
+                    if (previous.process.isAlive) {
+                        withTimeout(retirementTimeoutMs.milliseconds) { retirement.await() }
                     }
                 } catch (timeout: TimeoutCancellationException) {
-                    throw IOException("Native worker did not retire within ${retirementTimeoutMs}ms", timeout)
+                    if (previous.process.isAlive)
+                        throw IOException("Native worker did not retire within ${retirementTimeoutMs}ms", timeout)
+                } catch (failure: Exception) {
+                    if (failure is CancellationException || previous.process.isAlive) throw failure
                 }
+                if (previous.process.isAlive) throw IOException("Native worker is still alive after retirement")
             }
             if (request.cancelled.get()) return@withContext
             require(cwd.isDirectory) { "Kokoro runtime is not installed: $cwd" }
@@ -163,10 +206,11 @@ class KokoroSession internal constructor(
                 put("NNOPT_GPU_FP32_GENERATOR", "1")
                 put("NNOPT_PRE_ALLOC_WEIGHTS", "1")
                 put("NNOPT_VERIFY_WEIGHTS", "0")
-                put("NNOPT_QCOM_PRIORITY", "low")
+                put("NNOPT_QCOM_PRIORITY", priority.setting)
                 // Whole-graph replay cannot observe cancellation between blocks.
                 put("NNOPT_RECORD", "0")
                 put("NNOPT_COOPERATIVE", "1")
+                if (diagnosticsEnabled) put("NNOPT_DIAGNOSTICS", "1")
             }
             val started = Worker(processFactory(builder), voiceKey)
             val accepted = synchronized(lock) {
@@ -184,11 +228,16 @@ class KokoroSession internal constructor(
                 retire(started, "startup failed")
                 throw t
             }
-            Log.i(TAG, "Kokoro ready: protocol=2 build=0.6.11")
+            if (diagnosticsEnabled) Log.i(TAG, "Kokoro ready: protocol=2 priority=${priority.setting}")
         }
 
     /** Pipe reads live on the reader thread, so timeout also covers partial PCM. */
-    suspend fun speak(request: Request, text: String, speechRate: Float, onAudio: (PcmAudio) -> Unit) {
+    suspend fun speak(
+        request: Request, text: String, speechRate: Float,
+        timing: DebugTiming? = null,
+        timeoutMs: Long = synthesisTimeoutMs,
+        onAudio: (PcmAudio) -> Unit,
+    ) {
         if (request.cancelled.get()) return
         val commandId = ids.incrementAndGet()
         val target = synchronized(lock) {
@@ -198,13 +247,39 @@ class KokoroSession internal constructor(
             if (current.retiring.get()) throw IOException("Kokoro worker is retiring")
             current.commandId = commandId
             current.lastNativeError.set(null)
+            current.lastNativeStage.set(null)
+            current.debugTiming.set(timing)
+            current.debugCommandId.set(commandId)
             // Same lock + FIFO writer: CANCEL cannot overtake its SAY.
             send(current, KokoroProtocol.say(commandId, speechRate, text))
             current
         }
         var totalSamples = 0
+        val deadlineAt = SystemClock.elapsedRealtime() + timeoutMs
+        val deadlineUptime = if (diagnosticsEnabled) SystemClock.uptimeMillis() + timeoutMs else 0L
+        val completed = AtomicBoolean(false)
+        val expired = AtomicBoolean(false)
+        if (diagnosticsEnabled) {
+            Log.i(TAG, "KOKORO_DEADLINE_ARM request=${request.id} command=$commandId " +
+                "worker=${System.identityHashCode(target.process)} timeoutMs=$timeoutMs " +
+                "dueElapsedMs=$deadlineAt dueUptimeMs=$deadlineUptime")
+        }
+        val deadline = deadlines.schedule({
+            if (completed.compareAndSet(false, true)) {
+                expired.set(true)
+                Log.w(TAG, "KOKORO_DEADLINE request=${request.id} command=$commandId " +
+                    "lateMs=${SystemClock.elapsedRealtime() - deadlineAt} " +
+                    "cancelled=${request.cancelled.get()}")
+                if (diagnosticsEnabled) {
+                    Log.w(TAG, "KOKORO_DEADLINE_STATE request=${request.id} command=$commandId " +
+                        "worker=${System.identityHashCode(target.process)} " +
+                        "lateUptimeMs=${SystemClock.uptimeMillis() - deadlineUptime} " +
+                        "lastReceivedStage=${target.lastNativeStage.get() ?: "none"}")
+                }
+                retire(target, "independent synthesis deadline")
+            }
+        }, timeoutMs, TimeUnit.MILLISECONDS)
         try {
-            withTimeout(synthesisTimeoutMs.milliseconds) {
                 while (true) {
                     val event = target.events.receive()
                     if (event.id != commandId) throw IOException("Out-of-order Kokoro response ${event.id}, expected $commandId")
@@ -226,11 +301,18 @@ class KokoroSession internal constructor(
                         }
                     }
                 }
-            }
+            if (expired.get() && !request.cancelled.get())
+                throw InferenceDeadlineException("Native synthesis exceeded ${timeoutMs}ms")
         } catch (t: Throwable) {
             retire(target, "synthesis failed or timed out")
+            if (expired.get() && !request.cancelled.get())
+                throw InferenceDeadlineException("Native synthesis exceeded ${timeoutMs}ms")
             throw t
         } finally {
+            completed.set(true)
+            deadline.cancel(false)
+            target.debugTiming.compareAndSet(timing, null)
+            target.debugCommandId.compareAndSet(commandId, 0L)
             synchronized(lock) { if (target.commandId == commandId) target.commandId = null }
         }
     }
@@ -276,9 +358,11 @@ class KokoroSession internal constructor(
         try {
             target.commands.execute {
                 try {
+                    if (diagnosticsEnabled) debugIo(target, "stdin_write_begin", command.substringBefore(' '))
                     target.writer.write(command)
                     target.writer.newLine()
                     target.writer.flush() // Unlike PrintWriter, reports broken pipes.
+                    if (diagnosticsEnabled) debugIo(target, "stdin_write_end", command.substringBefore(' '))
                 } catch (_: Exception) {
                     retire(target, "native input closed")
                 }
@@ -286,6 +370,13 @@ class KokoroSession internal constructor(
         } catch (_: java.util.concurrent.RejectedExecutionException) {
             retire(target, "native command queue closed")
         }
+    }
+
+    private fun debugIo(target: Worker, event: String, kind: String = "PCM") {
+        if (!diagnosticsEnabled) return
+        Log.i(TAG, "KOKORO_IO event=$event kind=$kind command=${target.debugCommandId.get()} " +
+            "worker=${System.identityHashCode(target.process)} " +
+            "elapsedRealtimeMs=${SystemClock.elapsedRealtime()} uptimeMs=${SystemClock.uptimeMillis()}")
     }
 
     private fun startReader(target: Worker) {
@@ -296,18 +387,39 @@ class KokoroSession internal constructor(
                     for (line in lines) {
                         if (line.startsWith("ready.")) {
                             if (!line.contains("protocol=2")) throw IOException("Stale native runtime: protocol v2 required")
+                            if (diagnosticsEnabled) {
+                                // Report the binary's own build marker, not just
+                                // the Kotlin app version, to expose stale staging.
+                                Log.i(TAG, "KOKORO_NATIVE_READY worker=${System.identityHashCode(target.process)} $line")
+                            }
                             target.ready.complete(Unit)
                         } else if (line.startsWith("KOKORO_PCM_BEGIN ")) {
                             val header = KokoroProtocol.audioHeader(line)
                             val raw = ByteArray(header.samples * 2)
+                            val timing = target.debugTiming.get()
+                            val readStarted = if (timing != null) System.nanoTime() else 0L
+                            debugIo(target, "pcm_read_begin")
                             target.pcm.readFully(raw)
+                            debugIo(target, "pcm_read_end")
+                            if (timing != null) timing.pcmReadNs.addAndGet(System.nanoTime() - readStarted)
                             val samples = ShortArray(header.samples)
                             ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(samples)
                             if (target.events.trySend(KokoroProtocol.Audio(header.id, samples, header.rate)).isFailure) break
                         } else if (line.startsWith("KOKORO_UTT_END ")) {
+                            debugIo(target, "terminal_received", "END")
                             if (target.events.trySend(KokoroProtocol.end(line)).isFailure) break
+                        } else if (line.startsWith("KOKORO_TIMING ")) {
+                            // Internal debug protocol record, never log text or per-chunk data.
+                            target.debugTiming.get()?.acceptNative(line, target.debugCommandId.get())
+                        } else if (line.startsWith("KOKORO_STAGE ") && diagnosticsEnabled) {
+                            val stage = "$line worker=${System.identityHashCode(target.process)} " +
+                                "receivedElapsedMs=${SystemClock.elapsedRealtime()}"
+                            target.lastNativeStage.set(stage)
+                            Log.i(TAG, stage)
                         } else if (line.startsWith("KOKORO_MEMORY ")) {
-                            Log.i(TAG, line)
+                            if (diagnosticsEnabled) Log.i(TAG, line)
+                        } else if (line.startsWith("KOKORO_NO_SPEECH ")) {
+                            if (diagnosticsEnabled) Log.i(TAG, line)
                         } else if (line.startsWith("ERROR:") || line.startsWith("FATAL")) {
                             target.lastNativeError.set(line.take(MAX_NATIVE_ERROR_LENGTH))
                             Log.w(TAG, line)
@@ -331,19 +443,19 @@ class KokoroSession internal constructor(
         target.events.close(error)
         target.commands.shutdownNow()
         val workerId = System.identityHashCode(target.process)
-        Log.i(TAG, "Retiring native worker id=$workerId: $reason")
+        if (diagnosticsEnabled) Log.i(TAG, "Retiring native worker id=$workerId: $reason")
+        terminate(target, force = false)
         thread(name = "kokoro-retire", isDaemon = true) {
             try {
-                // Process exit is the gate for starting a replacement. Closing
-                // Java pipes can block behind another reader/writer and must
-                // never hold the retirement acknowledgement hostage.
-                target.process.destroy()
+                // Process.destroy() itself closes Java pipes. It can block
+                // behind a reader/writer even after the OS killed the child.
+                // Observe exit and escalate independently of that call.
                 if (!target.process.waitFor(1, TimeUnit.SECONDS)) {
-                    target.process.destroyForcibly()
+                    terminate(target, force = true)
                     if (!target.process.waitFor(2, TimeUnit.SECONDS)) throw IOException("Native worker did not exit")
                 }
                 target.retired.complete(Unit)
-                Log.i(TAG, "Native worker exited id=$workerId")
+                if (diagnosticsEnabled) Log.i(TAG, "Native worker exited id=$workerId")
             } catch (t: Throwable) {
                 target.retired.completeExceptionally(t)
                 Log.e(TAG, "Worker retirement failed id=$workerId", t)
@@ -354,6 +466,21 @@ class KokoroSession internal constructor(
             }
         }
         return target.retired
+    }
+
+    private fun terminate(target: Worker, force: Boolean) {
+        thread(name = if (force) "kokoro-kill" else "kokoro-terminate", isDaemon = true) {
+            val event = if (force) "force_destroy" else "destroy"
+            try {
+                debugIo(target, "${event}_begin", "RETIRE")
+                if (force) target.process.destroyForcibly() else target.process.destroy()
+                debugIo(target, "${event}_returned", "RETIRE")
+            } catch (failure: Exception) {
+                // The exit observer still checks the process and escalates.
+                Log.w(TAG, "Native $event failed worker=${System.identityHashCode(target.process)}: " +
+                    failure.javaClass.simpleName)
+            }
+        }
     }
 
     companion object {

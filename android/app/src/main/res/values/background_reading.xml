@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="background_reading_title">Reading with the screen off</string>
+    <string name="background_reading_explanation">Allow SC Kokoro to work in the background so it can keep generating speech when your screen is off. Battery optimization can interrupt reading on some devices. Android will ask you to confirm. Allowing background activity may increase battery use while generating speech.</string>
+    <string name="background_reading_allow">Allow background reading</string>
+    <string name="background_reading_later">Not now</string>
+    <string name="background_reading_enabled">Background reading is allowed. SC Kokoro is exempt from Android battery optimization.</string>
+    <string name="background_reading_unknown">Battery optimization status is unavailable. You can check the setting to help prevent interruptions when the screen is off.</string>
+    <string name="background_reading_manual">Open SC Kokoro’s battery settings and allow unrestricted background use or disable battery optimization.</string>
+</resources>

@@ -51,6 +51,8 @@
 #include "profiler.h"   // KernelProfiler::dump_summary — dormant unless NNOPT_PROFILE=1.
 
 extern "C" void nnopt_gen_reclaim_scratch_after_drain();
+extern "C" int nnopt_gen_trim_scratch_between_utterances(cl_command_queue queue);
+extern "C" size_t nnopt_gen_scratch_retained_bytes();
 
 
 #include "load_bin.h"    // load_int32_bin, load_float_bin (fixture loaders)
@@ -79,6 +81,7 @@ extern "C" void nnopt_gen_reclaim_scratch_after_drain();
 #include <thread>
 #include "cancellation.h"
 #include "stream_commands.h"
+#include "tts_gpu_guard.h"
 
 // Read prompt input ids from a binary file (int32 little-endian) when the
 // caller passes \`--token-ids /path/to/test_input_ids.bin\`. This path is
@@ -153,7 +156,7 @@ static bool probe_kokoro_opencl(OpenCLContext& cl_ctx, std::string& reason) {
 int main(int argc, char** argv) {
     // Build marker — lets us confirm from the engine log which binary is
     // actually running. Bump the tag on every device-facing engine change.
-    fprintf(stderr, "[engine] kokoro build: 0.6.11 protocol=2\n");
+    fprintf(stderr, "[engine] kokoro build: 0.6.23 protocol=2\n");
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
     // Argument parsing: positional "prompt" + optional flags.
@@ -438,6 +441,12 @@ int main(int argc, char** argv) {
     // A blank line or EOF exits the REPL cleanly.
     if (serve_stream_mode) {
 #ifdef NNOPT_TTS_STREAMING
+        // Android enables this only in debug builds. Keep the release hot path
+        // free of clocks and emit one private protocol record per SAY.
+        const bool diagnostics = [] {
+            const char* value = std::getenv("NNOPT_DIAGNOSTICS");
+            return value && value[0] == '1';
+        }();
         auto vp = load_float_bin(voicepack.c_str());
         if (vp.size() != 510u * 256u) {
             NNOPT_ERROR_FMT("voice_pack %s size %zu != 510*256", voicepack.c_str(), vp.size());
@@ -448,13 +457,26 @@ int main(int argc, char** argv) {
             return 5;
 
         // Protocol v2 pairs every audio/terminal frame with a command ID.
-        std::fprintf(stderr, "ready. protocol=2 build=0.6.11\n");
+        std::fprintf(stderr, "ready. protocol=2 build=0.6.23\n");
         std::fflush(stderr);
         TtsCommandReader reader(STDIN_FILENO);
         TtsCommand command;
         while (reader.next(command)) {
             nnopt_tts_begin(command.id);
+            using Clock = std::chrono::steady_clock;
+            auto nanos_since = [](Clock::time_point start) {
+                return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
+            };
+            long long g2p_ns = 0;
+            long long infer_ns = 0;
+            long long write_ns = 0;
+            size_t delivered_samples = 0;
             auto finish = [&](const char* status) {
+                if (diagnostics) {
+                    std::fprintf(stderr, "KOKORO_TIMING %llu %lld %lld %lld %zu\n",
+                                 (unsigned long long)command.id, g2p_ns, infer_ns,
+                                 write_ns, delivered_samples);
+                }
                 std::fprintf(stderr, "KOKORO_UTT_END %llu %s\n",
                              (unsigned long long)command.id, status);
                 std::fflush(stderr);
@@ -481,7 +503,11 @@ int main(int argc, char** argv) {
                 if (nnopt_tts_cancelled()) { cancelled = true; break; }
                 std::string text = std::move(chunks.front());
                 chunks.pop_front();
+                nnopt_tts_stage("phonemize_begin");
+                const auto g2p_start = diagnostics ? Clock::now() : Clock::time_point{};
                 auto ids = ph.phonemize(text);
+                if (diagnostics) g2p_ns += nanos_since(g2p_start);
+                nnopt_tts_stage("phonemize_end tokens=%zu", ids.size());
                 if (ids.size() <= 2) continue;
                 // Character count is not a model-token bound (numbers expand).
                 // Split only pathological phonemized input, retaining normal
@@ -499,17 +525,32 @@ int main(int argc, char** argv) {
                                          vp.begin() + (size_t)(vidx + 1) * 256);
                 std::vector<int16_t> pcm;
                 int rc = -1;
+                const auto infer_start = diagnostics ? Clock::now() : Clock::time_point{};
+                bool inference_recorded = false;
+                auto record_inference = [&] {
+                    if (diagnostics && !inference_recorded) {
+                        infer_ns += nanos_since(infer_start);
+                        inference_recorded = true;
+                    }
+                };
+                if (diagnostics) {
+                    nnopt_tts_stage("graph_begin tokens=%zu scratch=%zu",
+                                    ids.size(), nnopt_gen_scratch_retained_bytes());
+                }
                 try { rc = model.forward_graph(ids, style, pcm, command.rate); }
                 catch (const std::exception& error) {
+                    record_inference();
                     if (std::string(error.what()).find("Kokoro scratch-memory safety budget exceeded") != std::string::npos) {
                         // An aborted graph may still have GPU work queued.
                         // Drain before releasing all retained arena slots;
                         // otherwise every smaller retry inherits the same
                         // nearly-full memory budget.
+                        nnopt_tts_stage("scratch_recovery_drain_begin");
                         if (clFinish(cl_ctx.queue()) != CL_SUCCESS) {
                             NNOPT_ERROR("Scratch recovery could not drain the GPU queue");
                             finish("ERROR"); return 7;
                         }
+                        nnopt_tts_stage("scratch_recovery_drain_end");
                         nnopt_gen_reclaim_scratch_after_drain();
                         const auto now = std::chrono::steady_clock::now();
                         if (scratch_retries == 0) first_scratch_failure = now;
@@ -521,12 +562,16 @@ int main(int argc, char** argv) {
                             finish("ERROR"); return 7;
                         }
                         ++scratch_retries;
-                        std::fprintf(stderr, "KOKORO_MEMORY split_retry chars=%zu attempt=%d\n",
+                        if (diagnostics) std::fprintf(stderr, "KOKORO_MEMORY split_retry chars=%zu attempt=%d\n",
                                      text.size(), scratch_retries);
                         std::fflush(stderr);
                         continue;
                     }
                     NNOPT_ERROR_FMT("Inference exception: %s", error.what());
+                }
+                record_inference();
+                if (diagnostics) {
+                    nnopt_tts_stage("graph_end rc=%d scratch=%zu", rc, nnopt_gen_scratch_retained_bytes());
                 }
                 if (rc == -2 || nnopt_tts_cancelled()) { cancelled = true; break; }
                 if (rc == -3) {
@@ -541,20 +586,55 @@ int main(int argc, char** argv) {
                     finish("ERROR");
                     return 7;
                 }
+                nnopt_tts_stage("pcm_write_begin samples=%zu", pcm.size());
                 std::fprintf(stderr, "KOKORO_PCM_BEGIN %llu %zu 24000\n",
                              (unsigned long long)command.id, pcm.size());
                 std::fflush(stderr);
+                const auto write_start = diagnostics ? Clock::now() : Clock::time_point{};
                 if (std::fwrite(pcm.data(), sizeof(int16_t), pcm.size(), stdout) != pcm.size() ||
                     std::fflush(stdout) != 0) return 7;
+                if (diagnostics) write_ns += nanos_since(write_start);
+                if (diagnostics) delivered_samples += pcm.size();
+                nnopt_tts_stage("pcm_write_end");
                 produced = true;
             }
             if (cancelled) {
                 // Acknowledgement means the GPU has actually drained. If this
                 // hangs, Android's request-scoped watchdog retires this worker.
-                if (clFinish(cl_ctx.queue()) != CL_SUCCESS) { finish("ERROR"); return 7; }
+                nnopt_tts_stage("cancel_drain_begin");
+                if (clFinish(cl_ctx.queue()) != CL_SUCCESS) {
+                    NNOPT_ERROR("OpenCL queue drain failed after cancellation");
+                    finish("ERROR"); return 7;
+                }
+                nnopt_tts_stage("cancel_drain_end");
                 finish("CANCELLED");
             } else {
-                finish(produced ? "OK" : "ERROR");
+                if (!produced) {
+                    // Punctuation and formatting-only requests may have no
+                    // speakable phonemes. Android still expects a successful
+                    // synthesis callback, so deliver 10 ms of silence.
+                    const int16_t silence[240] = {};
+                    std::fprintf(stderr, "KOKORO_PCM_BEGIN %llu %zu 24000\n",
+                                 (unsigned long long)command.id,
+                                 sizeof(silence) / sizeof(silence[0]));
+                    std::fflush(stderr);
+                    if (std::fwrite(silence, sizeof(int16_t),
+                                    sizeof(silence) / sizeof(silence[0]), stdout) !=
+                            sizeof(silence) / sizeof(silence[0]) ||
+                        std::fflush(stdout) != 0) return 7;
+                    std::fprintf(stderr, "KOKORO_NO_SPEECH %llu\n",
+                                 (unsigned long long)command.id);
+                    std::fflush(stderr);
+                }
+                // Drain before releasing recorded generator buffers. Weight
+                // buffers and the warm model remain resident for the next SAY.
+                nnopt_tts_stage("scratch_trim_begin");
+                if (nnopt_gen_trim_scratch_between_utterances(cl_ctx.queue()) != 0) {
+                    NNOPT_ERROR("OpenCL queue drain failed before scratch cleanup");
+                    finish("ERROR"); return 7;
+                }
+                nnopt_tts_stage("scratch_trim_end");
+                finish("OK");
             }
         }
         return 0;

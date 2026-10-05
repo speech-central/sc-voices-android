@@ -10,8 +10,8 @@ android {
         applicationId = "com.labsii.voices"
         minSdk = 29
         targetSdk = 37
-        versionCode = 28
-        versionName = "0.6.11"
+        versionCode = 40
+        versionName = "0.6.23"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -24,6 +24,10 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     testOptions {

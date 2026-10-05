@@ -129,26 +129,40 @@ int model_forward_graph_tts(OpenCLContext& cl_ctx,
     auto t_prev = t_start;
     #define NONG_TICK(label) do { if (nong_prof) { clFinish(queue); auto _t = std::chrono::steady_clock::now(); double _s = std::chrono::duration<double>(_t - t_prev).count(); fprintf(stderr, "[nongen] %s @ %.3fs\n", (label), _s); fflush(stderr); t_prev = _t; } } while (0)
 
+    nnopt_tts_stage("input_ids_upload_begin");
     cl_mem ids_dev   = upload_i32(cl_ctx, queue, input_ids);
+    nnopt_tts_stage("input_ids_upload_end");
+    nnopt_tts_stage("style_upload_begin");
     cl_mem ref_s_dev = upload_floats_as_storage(cl_ctx, queue, ref_s);
+    nnopt_tts_stage("style_upload_end");
     if (!ids_dev || !ref_s_dev) { NNOPT_ERROR("backbone: input upload failed"); return -1; }
     NONG_TICK("upload_inputs");
     if (nnopt_tts_cancelled()) { owned.release(ids_dev); owned.release(ref_s_dev); return -2; }
 
+    nnopt_tts_stage("bert_alloc_begin");
     cl_mem bert_h = alloc_rw(cl_ctx, sz_t * T * Hbert);
+    nnopt_tts_stage("bert_begin");
     if (op_bert(cl_ctx, weights, queue, ids_dev, bert_h, T) != 0) return -1;
+    nnopt_tts_stage("bert_end");
     NONG_TICK("op_bert");
     if (nnopt_tts_cancelled()) { for (cl_mem m : {ids_dev, ref_s_dev, bert_h}) owned.release(m); return -2; }
 
+    nnopt_tts_stage("bert_encoder_alloc_begin");
     cl_mem d_en = alloc_rw(cl_ctx, sz_t * T * Hmodel);
+    nnopt_tts_stage("bert_encoder_begin");
     if (op_bert_encoder(cl_ctx, weights, queue, bert_h, d_en, T) != 0) return -1;
+    nnopt_tts_stage("bert_encoder_end");
     NONG_TICK("op_bert_encoder");
     if (nnopt_tts_cancelled()) { for (cl_mem m : {ids_dev, ref_s_dev, bert_h, d_en}) owned.release(m); return -2; }
 
     // Run DurationEncoder first to get d [T, 640]
+    nnopt_tts_stage("duration_encoder_alloc_begin");
     cl_mem d_de = alloc_rw(cl_ctx, sz_t * T * 640);
+    nnopt_tts_stage("duration_encoder_begin");
     if (op_predictor_duration_encoder(cl_ctx, weights, queue, d_en, ref_s_dev, d_de, T) != 0) return -1;
+    nnopt_tts_stage("duration_encoder_end");
     NONG_TICK("op_predictor_duration_encoder");
+    nnopt_tts_stage("duration_read_begin");
     if (nnopt_tts_cancelled()) { for (cl_mem m : {ids_dev, ref_s_dev, bert_h, d_en, d_de}) owned.release(m); return -2; }
 
     // Real durations from d
@@ -157,6 +171,7 @@ int model_forward_graph_tts(OpenCLContext& cl_ctx,
         NNOPT_ERROR("Real duration prediction failed");
         return -1;
     }
+    nnopt_tts_stage("duration_read_end");
     if (pred_dur.size() != (size_t)T) return -1;
     for (int duration : pred_dur) if (duration < 1 || duration > 1000) return -1;
     NONG_TICK("op_predictor_durations_real");
@@ -192,6 +207,7 @@ int model_forward_graph_tts(OpenCLContext& cl_ctx,
     // Avoid reaching the generator's memory budget for unusually long/slow
     // speech. The server retries as two word-aligned units, not truncated audio.
     if (total_frames > 600) return -3;
+    nnopt_tts_stage("alignment_begin frames=%lld", (long long)total_frames);
     std::vector<int> indices;
     int T_frames = op_alignment_make_indices(pred_dur, indices);
     if (T_frames <= 0) { NNOPT_ERROR("backbone: empty alignment"); return -1; }
@@ -213,7 +229,9 @@ int model_forward_graph_tts(OpenCLContext& cl_ctx,
     // F0/N at T_frames*2 (predictor middle block upsamples by 2).
     cl_mem F0_out = alloc_rw(cl_ctx, sz_t * T_frames * 2);
     cl_mem N_out  = alloc_rw(cl_ctx, sz_t * T_frames * 2);
+    nnopt_tts_stage("f0n_begin");
     if (op_predictor_F0N(cl_ctx, weights, queue, en640, ref_s_dev, F0_out, N_out, T_frames) != 0) return -1;
+    nnopt_tts_stage("f0n_end");
     owned.release(en640);
 
     NONG_TICK("alignment+gather+F0N");
@@ -222,16 +240,21 @@ int model_forward_graph_tts(OpenCLContext& cl_ctx,
         return -2;
     }
 
+    nnopt_tts_stage("text_encoder_alloc_begin");
     cl_mem t_en = alloc_rw(cl_ctx, sz_t * T * Hmodel);
+    nnopt_tts_stage("text_encoder_begin");
     if (op_text_encoder_modules(cl_ctx, weights, queue, ids_dev, t_en, T) != 0) return -1;
+    nnopt_tts_stage("text_encoder_end");
     NONG_TICK("op_text_encoder_modules");
     if (nnopt_tts_cancelled()) {
         for (cl_mem m : {ids_dev, ref_s_dev, bert_h, d_en, indices_dev, en, F0_out, N_out, t_en}) if (m) owned.release(m);
         return -2;
     }
 
+    nnopt_tts_stage("asr_gather_begin");
     cl_mem asr = alloc_rw(cl_ctx, sz_t * Hmodel * T_frames);
     if (op_alignment_gather_NCL(cl_ctx, queue, t_en, indices_dev, asr, T, T_frames, Hmodel) != 0) return -1;
+    nnopt_tts_stage("asr_gather_end");
     NONG_TICK("asr_gather");
     if (nnopt_tts_cancelled()) {
         for (cl_mem m : {ids_dev, ref_s_dev, bert_h, d_en, indices_dev, en, F0_out, N_out, t_en, asr}) if (m) owned.release(m);
@@ -239,12 +262,16 @@ int model_forward_graph_tts(OpenCLContext& cl_ctx,
     }
 
     cl_mem ref_s_dec = ref_s_dev;
+    nnopt_tts_stage("decoder_begin frames=%d", T_frames);
     int rc = op_decoder(cl_ctx, weights, queue, asr, F0_out, N_out, ref_s_dec,
                         T_frames, out_pcm_int16);
+    nnopt_tts_stage("decoder_end rc=%d", rc);
     NONG_TICK("op_decoder_total");
 
+    nnopt_tts_stage("graph_buffers_release_begin");
     for (cl_mem m : {ids_dev, ref_s_dev, bert_h, d_en, indices_dev, en, F0_out, N_out, t_en, asr}) {
         if (m) owned.release(m);
     }
+    nnopt_tts_stage("graph_buffers_release_end");
     return rc;
 }

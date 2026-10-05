@@ -1862,7 +1862,7 @@ struct GenArena {
             s.bytes = (err == CL_SUCCESS) ? alloc : 0;
             if (err != CL_SUCCESS || !s.mem) { s.bytes = 0; throw std::runtime_error("Kokoro scratch allocation failed"); }
             retained += s.bytes;
-            if (retained >= reported + 64ULL * 1024 * 1024) {
+            if (nnopt_tts_stage_diagnostics() && retained >= reported + 64ULL * 1024 * 1024) {
                 reported = retained;
                 std::fprintf(stderr, "KOKORO_MEMORY scratch_retained_bytes=%zu\n", retained);
                 std::fflush(stderr);
@@ -1874,13 +1874,26 @@ struct GenArena {
 };
 static GenArena g_gen_arena;
 static bool g_gen_arena_active = false;
+extern "C" size_t nnopt_gen_scratch_retained_bytes() { return g_gen_arena.retained; }
 
 // Call only after a failed graph unwinds and clFinish drains its queue.
 extern "C" void nnopt_gen_reclaim_scratch_after_drain() {
     const size_t bytes = g_gen_arena.retained;
     g_gen_arena.reclaimAfterDrain();
-    std::fprintf(stderr, "KOKORO_MEMORY scratch_reclaimed_bytes=%zu\n", bytes);
-    std::fflush(stderr);
+    if (nnopt_tts_stage_diagnostics()) {
+        std::fprintf(stderr, "KOKORO_MEMORY scratch_reclaimed_bytes=%zu\n", bytes);
+        std::fflush(stderr);
+    }
+}
+
+// Called only between complete streaming utterances. A rare long chunk must
+// not pin its large arena allocations for the rest of a reading session.
+extern "C" int nnopt_gen_trim_scratch_between_utterances(cl_command_queue queue) {
+    constexpr size_t kRetainedLimit = 512ULL * 1024 * 1024;
+    if (g_gen_arena.retained <= kRetainedLimit) return 0;
+    if (clFinish(queue) != CL_SUCCESS) return -1;
+    nnopt_gen_reclaim_scratch_after_drain();
+    return 0;
 }
 
 // All generator-path buffer releases funnel through this: forwards to
@@ -3309,7 +3322,10 @@ static int convtr1d_wn_fp32(OpenCLContext& cl_ctx, Weights& weights, cl_command_
                         clSetKernelArg(g_kf_gf_convtr_pack, 6, sizeof(int), &ntaps);
                         size_t gws_p[2] = {img_w, img_h};
                         nnopt_enqueue_profiled(queue, g_kf_gf_convtr_pack, 2, nullptr, gws_p, nullptr, 0, nullptr, nullptr);
-                        clFinish(queue);  // Wtmp released below — pack must be done
+                        nnopt_tts_stage("generator_weight_pack_wait_begin");
+                        const cl_int pack_done = clFinish(queue); // Wtmp released below.
+                        nnopt_tts_stage("generator_weight_pack_wait_end");
+                        if (pack_done != CL_SUCCESS) throw std::runtime_error("Generator weight pack GPU drain failed");
                         gen_release(Wtmp);
                         trimg = img;
                     } else {
@@ -3538,7 +3554,7 @@ extern "C" int op_decoder_gpu_fp32(OpenCLContext& cl_ctx, Weights& weights, cl_c
     // TICK serializes (clFinish) ONLY in debug builds — in release the
     // checkpoint is compiled out and the clFinish was 8 hidden pipeline
     // serialization points per utterance.
-    #define TICK(label) do { NNOPT_DEBUG_SYNC(queue); auto _t = std::chrono::steady_clock::now(); double _s = std::chrono::duration<double>(_t - t0).count(); NNOPT_CHECKPOINT((std::string("[fp32_gen] ") + (label) + " @ " + std::to_string(_s) + "s").c_str()); t0 = _t; } while (0)
+    #define TICK(label) do { NNOPT_DEBUG_SYNC(queue); nnopt_tts_stage(label); auto _t = std::chrono::steady_clock::now(); double _s = std::chrono::duration<double>(_t - t0).count(); NNOPT_CHECKPOINT((std::string("[fp32_gen] ") + (label) + " @ " + std::to_string(_s) + "s").c_str()); t0 = _t; } while (0)
 
     const int n_fft = 20, hop = 5, n_freq = 11;
     const int upsample_to_audio_full = 300;
@@ -3550,7 +3566,9 @@ extern "C" int op_decoder_gpu_fp32(OpenCLContext& cl_ctx, Weights& weights, cl_c
     std::vector<float> F0_host(T_dec_final);  // F0_pred at T_dec_final wait no — F0_pred is at T_frames*2 which equals T_dec_final
     {
         std::vector<uint16_t> fh(T_dec_final);
+        nnopt_tts_stage("generator_f0_read_begin");
         clEnqueueReadBuffer(queue, F0_pred_fp16, CL_TRUE, 0, sizeof(uint16_t)*T_dec_final, fh.data(), 0, nullptr, nullptr);
+        nnopt_tts_stage("generator_f0_read_end");
         for (int i = 0; i < T_dec_final; ++i) F0_host[i] = nnopt_f16_to_f32(fh[i]);
     }
     // Read style first 128
@@ -3930,7 +3948,9 @@ extern "C" int op_decoder_gpu_fp32(OpenCLContext& cl_ctx, Weights& weights, cl_c
     }
     if (!replayed) {
         g_gen_arena.pos = 0;   // restart slot handout if a record attempt consumed slots
+        nnopt_tts_stage("generator_span_submit_begin");
         span_rc = span(queue);
+        nnopt_tts_stage("generator_span_submit_end");
     }
     g_gen_arena_active = false;
     if (span_rc != 0) return nnopt_tts_cancelled() ? -2 : -1;
@@ -3947,7 +3967,9 @@ extern "C" int op_decoder_gpu_fp32(OpenCLContext& cl_ctx, Weights& weights, cl_c
     if (s_gpu_istft) {
         // GPU split+iSTFT already ran inside the span — one small readback.
         std::vector<float> audio_f((size_t)T_audio);
+        nnopt_tts_stage("generator_audio_read_begin");
         if (clEnqueueReadBuffer(queue, s_gr.audio, CL_TRUE, 0, sizeof(float) * T_audio, audio_f.data(), 0, nullptr, nullptr) != CL_SUCCESS) return -1;
+        nnopt_tts_stage("generator_audio_read_end");
         for (int i = 0; i < T_audio; ++i) audio[i] = (double)audio_f[i];
     } else {
         // Host fp64 path (NNOPT_HOST_ISTFT=1): cpost readback + CPU loop.

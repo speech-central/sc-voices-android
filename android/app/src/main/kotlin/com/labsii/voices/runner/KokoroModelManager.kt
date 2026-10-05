@@ -173,7 +173,7 @@ class KokoroModelManager private constructor(private val context: Context) {
             instanceFollowRedirects = true
             requestMethod = "GET"
             setRequestProperty("Accept-Encoding", "identity")
-            setRequestProperty("User-Agent", "Labsii-Voices/0.6.11")
+            setRequestProperty("User-Agent", "Labsii-Voices/${com.labsii.voices.BuildConfig.VERSION_NAME}")
             if (existing > 0L) setRequestProperty("Range", "bytes=$existing-")
         }
 
