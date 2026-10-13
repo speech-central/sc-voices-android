@@ -1,9 +1,9 @@
-> Historical developer troubleshooting guide. Version 0.6.23 adds a user-approved
-> per-app battery-optimization exemption after this resolved screen-off stalls in
-> device testing. Normal users should use the app's background-reading button;
+> Historical developer troubleshooting guide. Version 0.6.25 shows the actual
+> per-app battery-optimization exemption and offers an Edit button to open Settings.
+> Normal users should use that button;
 > the capture procedure below is only for failures that persist afterward.
 > Record the exemption state when reporting a new failure. Current native marker:
-> `ready. protocol=2 build=0.6.23`.
+> `ready. protocol=2 build=0.6.25`.
 
 # Stall capture guide (updated for 0.6.21)
 

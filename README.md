@@ -11,10 +11,10 @@ yet; the service/model boundary is intentionally small so it can be added as a
 second engine without bringing back unrelated Edgi application code.
 
 The application and Android TTS engine use the short display name **SC Kokoro**.
-Package ID: `com.labsii.voices`. Version: **0.6.23 (40)**.
+Package ID: `com.labsii.voices`. Version: **0.6.25 (42)**.
 
 For uninterrupted screen-off reading on affected devices, allow SC Kokoro to
-ignore battery optimization when prompted after setup. The app checks the
+ignore battery optimization using Edit on the background reading card. The app checks the
 actual Android exemption and offers the same control on its status screen.
 In Samsung Galaxy Tab A9+ testing, adding this per-app exemption resolved the
 screen-off stall; disabling device-wide idle modes was not needed.
@@ -52,19 +52,17 @@ TTS data is available.
 
 ## Background reading
 
-After installation, SC Kokoro explains why background access is recommended and
-opens Android's confirmation dialog only after the user selects **Allow background
-reading**. **Not now** leaves the engine usable and the button available later.
-Already-exempt users are not prompted. The status refreshes when returning from
-Settings and shows revoked exemptions without repeatedly opening dialogs.
+The experience and status screens show the actual Android battery-optimization
+exemption: Enabled, Not enabled, or Status unavailable. An adjacent **Edit**
+button opens the general battery-optimization settings list. Select SC Kokoro
+and disable optimization, then return to check the refreshed status. If that
+list is unavailable, the button falls back to app details.
 
-The manifest permission `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` permits this
-user-approved request; it does not grant an exemption automatically. No engine
-wake lock, foreground service, audio-focus request, or silent playback is added.
-This permission is requested because idle restrictions were observed to break
-core offline background synthesis. Before Play submission, use that concrete
-functionality and device evidence when explaining the permission; store approval
-is not guaranteed by the implementation. See [Android's exemption guidance](https://developer.android.com/training/monitoring-device-state/doze-standby).
+A visible, optional explanation notes that some devices require the exemption
+for uninterrupted background reading. No dialog or settings screen opens
+automatically. The app remains usable without the exemption. This version removes
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` and the direct exemption request. No engine
+wake lock or foreground service is added.
 
 The adaptive watchdog remains as bounded protection against native failures,
 with at most one retry before audio has been delivered. It cannot grant

@@ -6,10 +6,14 @@
 package com.labsii.voices.runner
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.os.SystemClock
 import android.content.Intent
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,6 +26,9 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URL
 
 /**
@@ -33,6 +40,7 @@ class KokoroModelManager private constructor(private val context: Context) {
 
     sealed interface State {
         data object NotInstalled : State
+        data object Preparing : State
         data class Downloading(
             val currentFile: String,
             val bytesDone: Long,
@@ -63,7 +71,9 @@ class KokoroModelManager private constructor(private val context: Context) {
             context.sendBroadcast(Intent(TextToSpeech.Engine.ACTION_TTS_DATA_INSTALLED))
             return
         }
-        installJob = scope.launch {
+        _state.value = State.Preparing
+        installJob = scope.launch(start = CoroutineStart.LAZY) {
+            val started = SystemClock.elapsedRealtime()
             try {
                 verifyPackagedRuntime()
                 extractBundledRuntimeFiles()
@@ -75,12 +85,36 @@ class KokoroModelManager private constructor(private val context: Context) {
                 _state.value = State.NotInstalled
             } catch (t: Throwable) {
                 Log.e(TAG, "Kokoro installation failed", t)
-                _state.value = State.Failed(t.message ?: t.javaClass.simpleName)
+                // Make even an immediate repeat failure visible to StateFlow collectors.
+                delay((700L - (SystemClock.elapsedRealtime() - started)).coerceAtLeast(0L))
+                synchronized(this@KokoroModelManager) {
+                    installJob = null
+                    _state.value = State.Failed(downloadFailureMessage(t))
+                }
             }
         }
+        installJob?.start()
     }
 
     fun retry() = ensureInstalled()
+
+    private fun downloadFailureMessage(error: Throwable): String {
+        val causes = generateSequence(error) { it.cause }.take(10).toList()
+        if (causes.any { it is UnknownHostException || it is SocketException || it is SocketTimeoutException }) {
+            val offline = runCatching {
+                val connectivity = context.getSystemService(ConnectivityManager::class.java)
+                connectivity != null && connectivity.activeNetwork == null
+            }.getOrDefault(false)
+            if (offline) return "An internet connection is needed to download the model and voices. Connect to Wi-Fi or mobile data, then tap Retry download."
+            if (causes.any { it is UnknownHostException || it is SocketException }) {
+                return "Unable to reach the model download server. An internet connection is required. Check your connection, or try another network, then tap Retry download."
+            }
+            if (causes.any { it is SocketTimeoutException }) {
+                return "The download connection timed out. Check your internet connection and tap Retry download. Saved download progress will be reused."
+            }
+        }
+        return error.message ?: error.javaClass.simpleName
+    }
 
     private fun verifyPackagedRuntime() {
         val binary = File(context.applicationInfo.nativeLibraryDir, NATIVE_BINARY)

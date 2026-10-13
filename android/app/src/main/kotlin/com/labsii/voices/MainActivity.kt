@@ -5,9 +5,7 @@
  */
 package com.labsii.voices
 
-import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Typeface
@@ -23,7 +21,6 @@ import android.widget.TextView
 import android.widget.Toast
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.labsii.voices.runner.KokoroDeviceProbe
 import com.labsii.voices.runner.KokoroModelManager
@@ -63,15 +60,13 @@ class MainActivity : Activity() {
     private var selfTestPassed = false
     private var needsSelfTest = false
     private val backgroundReadingCards = mutableListOf<Pair<TextView, MaterialButton>>()
-    private var backgroundDialog: Dialog? = null
-    private var activityResumed = false
-    private var showingInstalledScreen = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         onboardingComplete = preferences.getBoolean("complete", false)
         manager = KokoroModelManager.get(applicationContext)
         setContentView(buildUi())
+        statusView.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         scope.launch {
             val probe = KokoroDeviceProbe.probe(applicationContext)
             if (!probe.compatible && probe.conclusive) {
@@ -91,18 +86,10 @@ class MainActivity : Activity() {
 
     override fun onPostResume() {
         super.onPostResume()
-        activityResumed = true
         refreshBackgroundReading()
     }
 
-    override fun onPause() {
-        activityResumed = false
-        super.onPause()
-    }
-
     override fun onDestroy() {
-        backgroundDialog?.dismiss()
-        backgroundDialog = null
         scope.cancel()
         super.onDestroy()
     }
@@ -229,12 +216,22 @@ class MainActivity : Activity() {
 
     private fun backgroundReadingCard(): MaterialCardView = card { content ->
         content.addView(sectionTitle(getString(R.string.background_reading_title)))
-        val status = bodyText("")
-        val button = primaryButton(getString(R.string.background_reading_allow)).apply {
-            setOnClickListener { requestBackgroundReading() }
+        content.addView(bodyText(getString(R.string.background_reading_explanation)))
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        content.addView(status)
-        content.addView(button, matchParams(top = 20))
+        val status = bodyText("").apply {
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, 0, dp(12), 0)
+        }
+        val button = primaryButton(getString(R.string.background_reading_edit)).apply {
+            setOnClickListener { openBackgroundReadingSettings() }
+        }
+        row.addView(status, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(button, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        content.addView(row, matchParams(top = 12))
         backgroundReadingCards.add(status to button)
     }
 
@@ -244,66 +241,34 @@ class MainActivity : Activity() {
 
     private fun refreshBackgroundReading() {
         val exempt = batteryExempt()
-        for ((status, button) in backgroundReadingCards) {
+        for ((status, _) in backgroundReadingCards) {
             status.setText(when (exempt) {
                 true -> R.string.background_reading_enabled
-                false -> R.string.background_reading_explanation
+                false -> R.string.background_reading_disabled
                 null -> R.string.background_reading_unknown
             })
-            button.visibility = if (exempt == true) View.GONE else View.VISIBLE
         }
-        if (exempt == true) {
-            backgroundDialog?.dismiss()
-            // Already-exempt installations need no automatic prompt either.
-            if (!preferences.getBoolean(BACKGROUND_PROMPT_SHOWN, false)) {
-                preferences.edit { putBoolean(BACKGROUND_PROMPT_SHOWN, true) }
-            }
-            return
-        }
-        if (exempt != false || !activityResumed || !showingInstalledScreen ||
-            isFinishing || isDestroyed || backgroundDialog != null ||
-            preferences.getBoolean(BACKGROUND_PROMPT_SHOWN, false)) return
-
-        // Persist before showing: returning from Settings, rotation or declining
-        // must never cause a prompt loop. The card always permits a later retry.
-        preferences.edit { putBoolean(BACKGROUND_PROMPT_SHOWN, true) }
-        backgroundDialog = MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.background_reading_title)
-            .setMessage(R.string.background_reading_explanation)
-            .setPositiveButton(R.string.background_reading_allow) { _, _ -> requestBackgroundReading() }
-            .setNegativeButton(R.string.background_reading_later, null)
-            .setOnDismissListener { backgroundDialog = null }
-            .show()
     }
 
-    @SuppressLint("BatteryLife") // Core offline synthesis stalls under idle restrictions on affected devices.
-    private fun requestBackgroundReading() {
-        preferences.edit { putBoolean(BACKGROUND_PROMPT_SHOWN, true) }
-        if (batteryExempt() == true) {
-            refreshBackgroundReading()
-            return
-        }
-        val packageUri = Uri.parse("package:$packageName")
+    private fun openBackgroundReadingSettings() {
+        // No direct exemption request or automatic navigation. The user chooses
+        // the app in Settings; refresh on return checks the actual OS state.
         val intents = listOf(
-            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, packageUri),
             Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")),
         )
-        for ((index, intent) in intents.withIndex()) {
+        for (intent in intents) {
             try {
                 startActivity(intent)
-                if (index > 0) Toast.makeText(this,
-                    R.string.background_reading_manual, Toast.LENGTH_LONG).show()
-                // The setting is queried again on return; a successful launch
-                // or activity result does not mean the user granted exemption.
+                Toast.makeText(this, R.string.background_reading_manual, Toast.LENGTH_LONG).show()
                 return
             } catch (_: ActivityNotFoundException) {
-                // Some device builds expose only the general battery screen.
+                // Fall back to app details when the battery list is unavailable.
             } catch (_: SecurityException) {
-                // Managed devices may disallow the direct request.
+                // Managed devices may block a settings screen.
             }
         }
-        Toast.makeText(this, R.string.background_reading_manual, Toast.LENGTH_LONG).show()
+        Toast.makeText(this, R.string.background_reading_unavailable, Toast.LENGTH_LONG).show()
     }
 
     private fun renderDeviceExperience(renderer: String?) {
@@ -385,13 +350,13 @@ class MainActivity : Activity() {
 
     private suspend fun renderState(state: KokoroModelManager.State) {
         when (state) {
-            KokoroModelManager.State.NotInstalled -> {
+            KokoroModelManager.State.NotInstalled, KokoroModelManager.State.Preparing -> {
                 showScreen(downloadScreen)
                 downloadTitleView.text = "Download Kokoro"
                 progressBar.visibility = View.VISIBLE
                 progressBar.isIndeterminate = true
                 retryButton.visibility = View.GONE
-                statusView.text = "Preparing the secure download…"
+                statusView.text = "Checking files and preparing download…"
                 progressPercentView.text = ""
             }
             is KokoroModelManager.State.Downloading -> {
@@ -437,7 +402,10 @@ class MainActivity : Activity() {
                 progressBar.isIndeterminate = false
                 progressBar.visibility = View.GONE
                 retryButton.visibility = View.VISIBLE
-                statusView.text = "Kokoro setup failed: ${state.message}"
+                downloadTitleView.text = "Download could not complete"
+                retryButton.text = "Retry download"
+                retryButton.setOnClickListener { manager.retry() }
+                statusView.text = state.message
                 progressPercentView.text = ""
             }
         }
@@ -463,7 +431,6 @@ class MainActivity : Activity() {
         downloadScreen.visibility = if (screen === downloadScreen) View.VISIBLE else View.GONE
         experienceScreen.visibility = if (screen === experienceScreen) View.VISIBLE else View.GONE
         readyScreen.visibility = if (screen === readyScreen) View.VISIBLE else View.GONE
-        showingInstalledScreen = screen === readyScreen || screen === experienceScreen
         refreshBackgroundReading()
     }
 
@@ -539,7 +506,6 @@ class MainActivity : Activity() {
         if (this % 1.0 == 0.0) toInt().toString() else toString()
 
     private companion object {
-        const val BACKGROUND_PROMPT_SHOWN = "background_reading_prompt_shown"
         const val SPEECH_CENTRAL_URL =
             "https://play.google.com/store/apps/details?id=com.labsiisoftware.speechcentral"
     }

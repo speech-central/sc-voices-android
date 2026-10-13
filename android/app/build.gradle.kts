@@ -10,8 +10,8 @@ android {
         applicationId = "com.labsii.voices"
         minSdk = 29
         targetSdk = 37
-        versionCode = 40
-        versionName = "0.6.23"
+        versionCode = 42
+        versionName = "0.6.25"
 
         ndk {
             abiFilters += "arm64-v8a"
