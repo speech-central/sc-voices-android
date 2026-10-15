@@ -1,5 +1,7 @@
 # SC Kokoro
 
+**Now available on Google Play — [Download SC Kokoro](https://play.google.com/store/apps/details?id=com.labsii.voices).**
+
 An Android system text-to-speech engine that runs Kokoro-82M through the
 OpenCL runtime from [a8nova/adreno-llms](https://github.com/a8nova/adreno-llms).
 The Android `TextToSpeechService` integration is based on the architecture of
