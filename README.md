@@ -8,9 +8,7 @@ The Android `TextToSpeechService` integration is based on the architecture of
 [VoxSherpa TTS](https://github.com/CodeBySonu95/VoxSherpa-TTS).
 
 This Kokoro-first release automatically installs **28 English voices**
-(20 US and 8 UK) at 24 kHz, with Heart as the default. Pocket-TTS is not wired into this release
-yet; the service/model boundary is intentionally small so it can be added as a
-second engine without bringing back unrelated Edgi application code.
+(20 US and 8 UK) at 24 kHz, with Heart as the default.
 
 The application and Android TTS engine use the short display name **SC Kokoro**.
 Package ID: `com.labsii.voices`. Version: **0.6.25 (42)**.
