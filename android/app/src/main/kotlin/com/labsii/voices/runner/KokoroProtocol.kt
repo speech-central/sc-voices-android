@@ -4,7 +4,7 @@ package com.labsii.voices.runner
 import java.io.IOException
 import java.util.Locale
 
-/** Strict v2 framing, shared by the worker and JVM regression tests. */
+/** Strict v3 framing, shared by the worker and JVM regression tests. */
 internal object KokoroProtocol {
     sealed interface Event { val id: Long }
     data class Audio(override val id: Long, val samples: ShortArray, val sampleRate: Int) : Event {
@@ -32,12 +32,13 @@ internal object KokoroProtocol {
     data class End(override val id: Long, val status: String) : Event
     data class Header(val id: Long, val samples: Int, val rate: Int)
 
-    fun say(id: Long, rate: Float, text: String): String {
+    fun say(id: Long, rate: Float, text: String, pitch: Float = 1f): String {
         require(id > 0)
         val clean = text.replace(Regex("[\\r\\n\\u0000]+"), " ").trim()
         require(clean.isNotEmpty() && clean.toByteArray(Charsets.UTF_8).size <= 12_000)
         val speed = if (rate.isFinite()) rate.coerceIn(0.5f, 2.0f) else 1.0f
-        return "SAY %d %.3f %s".format(Locale.ROOT, id, speed, clean)
+        val adjustedPitch = KokoroPitch.effective(pitch)
+        return "SAY %d %.3f %s %s".format(Locale.ROOT, id, speed, adjustedPitch.toString(), clean)
     }
 
     fun audioHeader(line: String): Header {

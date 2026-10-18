@@ -50,7 +50,8 @@ public:
               const std::string& vocab_tsv,
               const std::string& voice = "en-us");
 
-    // text -> Kokoro vocab ids, wrapped [pad] + ids + [pad] (matches stream.py).
+    // Text -> Kokoro vocab ids, wrapped [pad] + ids + [pad].
+    // Restores clause-ending punctuation omitted by the eSpeak IPA API.
     std::vector<int32_t> phonemize(const std::string& text) const;
 
     bool ready() const { return ready_; }

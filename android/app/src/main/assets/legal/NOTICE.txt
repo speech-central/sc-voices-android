@@ -51,7 +51,19 @@ projects. Neither upstream project sponsors or endorses this derivative.
    grapheme-to-phoneme conversion. Its English language data downloads on the
    first application launch.
 
-5. Build-time components
+5. Rubber Band Library
+
+   Source: https://github.com/breakfastquay/rubberband
+   Version: 4.0.0 (tag v4.0.0), vendored unchanged in native/third_party/rubberband
+   Copyright 2007-2024 Particular Programs Ltd.
+   License: GNU General Public License version 2 or later; used under GPLv3
+   in this combined GPL-3.0-or-later distribution.
+
+   Formant-preserving pitch adjustment uses the R3 engine, built-in FFT and
+   resampler. It runs only for a non-neutral pitch request. The complete
+   upstream source and license are supplied; no commercial-only code is used.
+
+6. Build-time components
 
    CLBlast 1.6.3: https://github.com/CNugteren/CLBlast
    Khronos OpenCL Headers: https://github.com/KhronosGroup/OpenCL-Headers

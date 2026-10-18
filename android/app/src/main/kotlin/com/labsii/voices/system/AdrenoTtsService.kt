@@ -23,6 +23,7 @@ import android.speech.tts.Voice
 import android.util.Log
 import com.labsii.voices.BuildConfig
 import com.labsii.voices.runner.KokoroModelManager
+import com.labsii.voices.runner.KokoroPitch
 import com.labsii.voices.runner.KokoroSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -185,6 +186,10 @@ class AdrenoTtsService : TextToSpeechService() {
                 ?.coerceIn(MIN_SPEECH_RATE, MAX_SPEECH_RATE)
                 ?: DEFAULT_SPEECH_RATE
 
+            val pitch = KokoroPitch.effective(request.pitch / 100f)
+            if (BuildConfig.DEBUG) Log.i(TAG, "KOKORO_PITCH id=${current.id} " +
+                "requested=${request.pitch / 100f} effective=$pitch")
+
             if (callback.start(SAMPLE_RATE, AudioFormat.ENCODING_PCM_16BIT, 1) != TextToSpeech.SUCCESS) {
                 throw IllegalStateException("TTS client rejected the Kokoro audio format")
             }
@@ -259,7 +264,7 @@ class AdrenoTtsService : TextToSpeechService() {
                     "chars=${chunk.length} rtf=${synthesisWatchdog.estimatedRtf} timeoutMs=$timeoutMs")
                 try {
                     try {
-                        runBlocking { session.speak(current, chunk, speechRate, debug, timeoutMs, deliver) }
+                        runBlocking { session.speak(current, chunk, speechRate, debug, timeoutMs, pitch, deliver) }
                     } catch (stalled: KokoroSession.InferenceDeadlineException) {
                         if (recoveryAttempted || chunkDelivered || current.cancelled.get()) throw stalled
                         recoveryAttempted = true
@@ -270,7 +275,7 @@ class AdrenoTtsService : TextToSpeechService() {
                                 KokoroSession.GpuPriority.LOW)
                         }
                         if (current.cancelled.get()) return
-                        runBlocking { session.speak(current, chunk, speechRate, debug, timeoutMs, deliver) }
+                        runBlocking { session.speak(current, chunk, speechRate, debug, timeoutMs, pitch, deliver) }
                     }
                 } finally {
                     if (debug != null) {

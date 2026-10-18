@@ -156,7 +156,7 @@ static bool probe_kokoro_opencl(OpenCLContext& cl_ctx, std::string& reason) {
 int main(int argc, char** argv) {
     // Build marker — lets us confirm from the engine log which binary is
     // actually running. Bump the tag on every device-facing engine change.
-    fprintf(stderr, "[engine] kokoro build: 0.6.25 protocol=2\n");
+    fprintf(stderr, "[engine] kokoro build: 0.6.27 protocol=3\n");
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
     // Argument parsing: positional "prompt" + optional flags.
@@ -456,8 +456,8 @@ int main(int argc, char** argv) {
         if (!ph.init(/*espeak_data_parent=*/"assets", "assets/phoneme_vocab.tsv", voice))
             return 5;
 
-        // Protocol v2 pairs every audio/terminal frame with a command ID.
-        std::fprintf(stderr, "ready. protocol=2 build=0.6.25\n");
+        // Protocol v3 pairs every audio/terminal frame with a command ID.
+        std::fprintf(stderr, "ready. protocol=3 build=0.6.27\n");
         std::fflush(stderr);
         TtsCommandReader reader(STDIN_FILENO);
         TtsCommand command;
@@ -586,6 +586,21 @@ int main(int argc, char** argv) {
                     finish("ERROR");
                     return 7;
                 }
+                if (command.pitch != 1.f) {
+                    nnopt_tts_stage("pitch_begin ratio=%.4f", command.pitch);
+                    const auto pitch_start = diagnostics ? Clock::now() : Clock::time_point{};
+                    try {
+                        if (!nnopt_tts::shift_pitch(pcm, command.pitch, nnopt_tts_cancelled)) {
+                            cancelled = true; break;
+                        }
+                    } catch (const std::exception& error) {
+                        NNOPT_ERROR_FMT("Pitch processing failed: %s", error.what());
+                        finish("ERROR"); return 7;
+                    }
+                    if (diagnostics) nnopt_tts_stage("pitch_end samples=%zu elapsedMs=%lld",
+                        pcm.size(), (long long)(nanos_since(pitch_start) / 1000000));
+                }
+                if (nnopt_tts_cancelled()) { cancelled = true; break; }
                 nnopt_tts_stage("pcm_write_begin samples=%zu", pcm.size());
                 std::fprintf(stderr, "KOKORO_PCM_BEGIN %llu %zu 24000\n",
                              (unsigned long long)command.id, pcm.size());

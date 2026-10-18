@@ -54,7 +54,7 @@ class KokoroSessionTest {
             }
             override fun close() { closeGate?.await() }
         }
-        init { event("ready. protocol=2 build=test") }
+        init { event("ready. protocol=3 build=test") }
         fun event(value: String) = errors.put((value + "\n").toByteArray())
         fun success(id: String) {
             event("KOKORO_PCM_BEGIN $id 2 24000")
@@ -108,6 +108,25 @@ class KokoroSessionTest {
         val session = KokoroSession(dir.path, dir, { builder -> onBuilder(builder); factory() }, timeout, 50, scheduler,
             retirementTimeout, idleTimeout, diagnostics)
         try { body(session) } finally { session.close(); scheduler.shutdownNow(); dir.deleteRecursively() }
+    }
+
+    @Test fun pitchIsPerCommandAndDoesNotRestartWorker() = runBlocking {
+        var starts = 0
+        val commands = mutableListOf<String>()
+        fixture({ starts++; FakeProcess { p, line ->
+            commands += line
+            p.success(line.split(' ')[1])
+        } }) { session ->
+            for (pitch in listOf(0.76f, 1.01f, 1.24f, 1f)) {
+                val request = session.beginRequest()
+                session.start(request, "heart", "en-us")
+                session.speak(request, "Hello.", 1.25f, pitch = pitch) {}
+                session.finishRequest(request)
+            }
+            assertEquals(1, starts)
+            assertEquals(listOf("0.76", "1.0", "1.24", "1.0"), commands.map { it.split(' ')[3] })
+            assertTrue(commands.all { it.split(' ')[2] == "1.250" })
+        }
     }
 
     @Test fun consecutiveSentencesReuseWorkerAndDoNotLoseTerminalFrames() = runBlocking {

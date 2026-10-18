@@ -141,6 +141,84 @@ int utf8_len(unsigned char lead) {
     return 1;
 }
 
+size_t previous_codepoint(const std::string& text, size_t end) {
+    if (end == 0) return 0;
+    --end;
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xc0) == 0x80) --end;
+    return end;
+}
+
+bool closing_mark_or_space(const std::string& value) {
+    return (value.size() == 1 &&
+            (std::isspace(static_cast<unsigned char>(value[0])) ||
+             std::strchr("\"')]}>", value[0]) != nullptr)) ||
+           value == "”" || value == "’" || value == "»" ||
+           value == "\xc2\xa0" || value == "\xe2\x80\xaf";
+}
+
+bool abbreviation_period(const std::string& text, size_t dot, size_t next) {
+    // A final abbreviation may also end a sentence. Suppress its dot only
+    // when another word follows. Decimal points never end an eSpeak clause.
+    while (next < text.size()) {
+        const size_t end = std::min(text.size(), next + utf8_len(text[next]));
+        if (!closing_mark_or_space(text.substr(next, end - next))) break;
+        next = end;
+    }
+    if (next >= text.size()) return false;
+    size_t begin = dot;
+    while (begin > 0) {
+        const unsigned char c = text[begin - 1];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '.')) break;
+        --begin;
+    }
+    std::string word = text.substr(begin, dot - begin);
+    for (char& c : word) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static const std::set<std::string> abbreviations = {
+        "mr", "mrs", "ms", "dr", "prof", "rev", "hon", "sr", "jr", "st",
+        "vs", "etc", "e.g", "i.e", "fig", "no", "inc", "ltd", "dept",
+        "approx", "a.m", "p.m",
+    };
+    if (abbreviations.count(word)) return true;
+    // Initials and dotted initialisms, e.g. A. Smith and U.S. policy.
+    if (word.size() == 1) return true;
+    if (word.size() >= 3 && word.size() % 2 == 1) {
+        bool initials = true;
+        for (size_t i = 0; i < word.size(); ++i) {
+            if ((i % 2 == 1 && word[i] != '.') ||
+                (i % 2 == 0 && !(word[i] >= 'a' && word[i] <= 'z'))) initials = false;
+        }
+        if (initials) return true;
+    }
+    return false;
+}
+
+std::string clause_punctuation(const std::string& text, size_t consumed_begin,
+                               const void* next_clause) {
+    size_t end = next_clause ? static_cast<const char*>(next_clause) - text.c_str() : text.size();
+    // eSpeak NG 1.52 reads one UTF-8 codepoint ahead and retains it internally.
+    // Its returned pointer is AFTER that character, not at the clause boundary.
+    // Leave that lookahead out; never feed the consumed text back to eSpeak.
+    if (next_clause && end > consumed_begin) end = previous_codepoint(text, end);
+    while (end > consumed_begin) {
+        const size_t begin = previous_codepoint(text, end);
+        if (!closing_mark_or_space(text.substr(begin, end - begin))) break;
+        end = begin;
+    }
+    const size_t punctuation_end = end;
+    while (end > consumed_begin) {
+        const size_t begin = previous_codepoint(text, end);
+        const std::string mark = text.substr(begin, end - begin);
+        if (!(mark.size() == 1 && std::strchr(";:,.!?", mark[0])) &&
+            mark != "—" && mark != "–" && mark != "…") break;
+        end = begin;
+    }
+    std::string punctuation = text.substr(end, punctuation_end - end);
+    if (punctuation == "." && abbreviation_period(text, end, punctuation_end)) return {};
+    if (punctuation.size() >= 3 && punctuation.find_first_not_of('.') == std::string::npos) return "…";
+    if (punctuation == "–") return "—";
+    return punctuation;
+}
+
 }  // namespace
 
 Phonemizer::~Phonemizer() {
@@ -159,7 +237,10 @@ bool Phonemizer::init(const std::string& espeak_data_parent,
                      espeak_data_parent.c_str());
         return false;
     }
-    if (espeak_SetVoiceByName(voice.c_str()) != EE_OK) {
+    // The downloaded British voice is named "en". "en-gb" is its language
+    // tag, which eSpeak NG 1.52's name-based lookup does not resolve.
+    const char* espeak_voice = voice == "en-gb" ? "en" : voice.c_str();
+    if (espeak_SetVoiceByName(espeak_voice) != EE_OK) {
         std::fprintf(stderr, "FATAL Phonemizer: espeak voice '%s' not found.\n",
                      voice.c_str());
         espeak_Terminate();
@@ -209,11 +290,15 @@ std::vector<int32_t> Phonemizer::phonemize(const std::string& text) const {
     const char* text_c = text.c_str();
     const void* inptr = static_cast<const void*>(text_c);
     while (inptr != nullptr) {
+        const size_t consumed_begin = static_cast<const char*>(inptr) - text_c;
         const char* clause =
             espeak_TextToPhonemes(&inptr, espeakCHARS_UTF8, /*phonememode=*/0x02);
         if (clause && *clause) {
             if (!phonemes.empty()) phonemes += ' ';
             phonemes += clause;
+            // The IPA API omits punctuation. Restore the actual clause ending
+            // for Kokoro's learned prosody, without splitting synthesis further.
+            phonemes += clause_punctuation(text, consumed_begin, inptr);
         }
     }
 

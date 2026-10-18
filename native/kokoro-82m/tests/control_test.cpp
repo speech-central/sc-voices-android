@@ -11,13 +11,19 @@ extern "C" cl_int CL_API_CALL clReleaseMemObject(cl_mem m) { ++releases; delete 
 
 int main() {
     TtsCommand command;
-    assert(tts_parse_say("SAY 1 1.25 A regular sentence.", command));
-    assert(command.id == 1 && command.rate == 1.25f && command.text == "A regular sentence.");
-    assert(!tts_parse_say("SAY -1 1 Bad.", command));
-    assert(!tts_parse_say("SAY 1 nan Bad.", command));
-    assert(!tts_parse_say("SAY 0 1 Bad.", command));
+    assert(tts_parse_say("SAY 1 1.25 0.76 A regular sentence.", command));
+    assert(command.id == 1 && command.rate == 1.25f && command.pitch == 0.76f && command.text == "A regular sentence.");
+    assert(!tts_parse_say("SAY -1 1 1 Bad.", command));
+    assert(!tts_parse_say("SAY 1 nan 1 Bad.", command));
+    assert(!tts_parse_say("SAY 0 1 1 Bad.", command));
     assert(!tts_parse_say("SAY 1 1", command));
-    assert(!tts_parse_say("SAY 1 1 " + std::string(12001, 'a'), command));
+    assert(!tts_parse_say("SAY 1 1 1 " + std::string(12001, 'a'), command));
+    assert(!tts_parse_say("SAY 1 1 nan Bad.", command));
+    assert(!tts_parse_say("SAY 1 1 inf Bad.", command));
+    assert(!tts_parse_say("SAY 1 1 Hello.", command));
+    assert(tts_parse_say("SAY 1 1 1.02 Hello.", command) && command.pitch == 1.f);
+    assert(tts_parse_say("SAY 1 1 1.02001 Hello.", command) && command.pitch > 1.02f);
+    assert(tts_parse_say("SAY 1 1 9 Hello.", command) && command.pitch == 1.24f);
     nnopt_tts_cancel(10); // Cancel before dequeue must not be erased by begin.
     nnopt_tts_begin(10);
     assert(nnopt_tts_cancelled());
@@ -45,7 +51,7 @@ int main() {
     const auto start = std::chrono::steady_clock::now();
     {
         TtsCommandReader reader(fds[0]);
-        const std::string input = "SAY 20 1 Hello.\nCANCEL 20\n";
+        const std::string input = "SAY 20 1 1 Hello.\nCANCEL 20\n";
         assert(write(fds[1], input.data(), input.size()) == (ssize_t)input.size());
         assert(reader.next(command) && command.id == 20);
         // Destructor must join even though stdin is still open and idle.

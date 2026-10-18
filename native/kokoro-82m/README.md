@@ -7,9 +7,9 @@ TTS engine.
 
 The app uses only the persistent `--serve-stream` mode:
 
-- stdin: `SAY <id> <rate> <UTF-8 text>`, `CANCEL <id>`, or `QUIT`
+- stdin: `SAY <id> <rate> <pitch> <UTF-8 text>`, `CANCEL <id>`, or `QUIT`
 - IDs are positive and strictly increase within one process
-- stderr: `ready. protocol=2 ...`, `KOKORO_PCM_BEGIN <id> <samples> 24000`,
+- stderr: `ready. protocol=3 ...`, `KOKORO_PCM_BEGIN <id> <samples> 24000`,
   and `KOKORO_UTT_END <id> OK|CANCELLED|ERROR`
 - stdout: raw little-endian signed 16-bit mono PCM at 24 kHz
 

@@ -269,6 +269,14 @@ set(SOURCES
     ${THIRD_PARTY_SOURCES}
 )
 
+# Pinned, vendored Rubber Band 4.0.0; built-in FFT/resampler, no helper threads.
+set(RUBBERBAND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rubberband")
+add_library(kokoro_pitch STATIC "${RUBBERBAND_DIR}/single/RubberBandSingle.cpp")
+target_include_directories(kokoro_pitch PUBLIC "${RUBBERBAND_DIR}")
+if(APPLE)
+    target_link_libraries(kokoro_pitch PUBLIC "-framework Accelerate")
+endif()
+
 # Main inference binary
 add_executable(Kokoro_82M_inference ${SOURCES})
 if(KOKORO_PORTABLE_OPENCL)
@@ -289,7 +297,7 @@ set_target_properties(Kokoro_82M_inference PROPERTIES
 
 # Link libraries (backend-specific). Keep the keyword signature: CMake does
 # not allow mixing keyword and legacy plain target_link_libraries calls.
-target_link_libraries(Kokoro_82M_inference PRIVATE ${BACKEND_LIBRARIES})
+target_link_libraries(Kokoro_82M_inference PRIVATE ${BACKEND_LIBRARIES} kokoro_pitch)
 
 # ---------------------------------------------------------------------------
 # espeak-ng — on-device G2P for the system engine's --serve-stream mode.

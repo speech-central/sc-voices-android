@@ -8,10 +8,10 @@ android {
 
     defaultConfig {
         applicationId = "com.labsii.voices"
-        minSdk = 29
+        minSdk = 30 // Android 11; matches Speech Central's minimum.
         targetSdk = 37
-        versionCode = 42
-        versionName = "0.6.25"
+        versionCode = 44
+        versionName = "0.6.27"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -75,6 +75,7 @@ val stageKokoroRuntime = tasks.register<Exec>("stageKokoroRuntime") {
     // Do not make CMake's generated build tree an input: it is created by
     // this task and would otherwise cause a needless second native build.
     inputs.files(fileTree(nativeProject) { exclude("build/**") })
+    inputs.files(fileTree(projectRoot.resolve("native/third_party/rubberband")))
     inputs.file(setupScript)
     inputs.file(nativeBuildScript)
     inputs.file(stageScript)

@@ -1,6 +1,7 @@
 // Copyright 2026 Labsii Ltd. SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "cancellation.h"
+#include "pitch_shift.h"
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
@@ -15,7 +16,7 @@
 #include <thread>
 #include <unistd.h>
 
-struct TtsCommand { uint64_t id = 0; float rate = 1; std::string text; };
+struct TtsCommand { uint64_t id = 0; float rate = 1; float pitch = 1; std::string text; };
 
 inline bool tts_parse_id(const std::string& text, uint64_t& id) {
     const auto r = std::from_chars(text.data(), text.data() + text.size(), id);
@@ -25,11 +26,14 @@ inline bool tts_parse_id(const std::string& text, uint64_t& id) {
 inline bool tts_parse_say(const std::string& line, TtsCommand& out) {
     out = TtsCommand{};
     std::istringstream input(line);
-    std::string verb, id, rate;
-    if (!(input >> verb >> id >> rate) || verb != "SAY" || !tts_parse_id(id, out.id)) return false;
+    std::string verb, id, rate, pitch;
+    if (!(input >> verb >> id >> rate >> pitch) || verb != "SAY" || !tts_parse_id(id, out.id)) return false;
     char* end = nullptr;
     const float speed = std::strtof(rate.c_str(), &end);
     if (!end || end == rate.c_str() || *end || !std::isfinite(speed)) return false;
+    const float requested_pitch = std::strtof(pitch.c_str(), &end);
+    if (!end || end == pitch.c_str() || *end || !std::isfinite(requested_pitch)) return false;
+    out.pitch = nnopt_tts::effective_pitch(requested_pitch);
     std::getline(input >> std::ws, out.text);
     if (out.text.empty() || out.text.size() > 12000 || out.text.find('\0') != std::string::npos) return false;
     out.rate = std::max(0.5f, std::min(2.0f, speed));

@@ -228,7 +228,7 @@ class KokoroSession internal constructor(
                 retire(started, "startup failed")
                 throw t
             }
-            if (diagnosticsEnabled) Log.i(TAG, "Kokoro ready: protocol=2 priority=${priority.setting}")
+            if (diagnosticsEnabled) Log.i(TAG, "Kokoro ready: protocol=3 priority=${priority.setting}")
         }
 
     /** Pipe reads live on the reader thread, so timeout also covers partial PCM. */
@@ -236,6 +236,7 @@ class KokoroSession internal constructor(
         request: Request, text: String, speechRate: Float,
         timing: DebugTiming? = null,
         timeoutMs: Long = synthesisTimeoutMs,
+        pitch: Float = 1f,
         onAudio: (PcmAudio) -> Unit,
     ) {
         if (request.cancelled.get()) return
@@ -251,7 +252,7 @@ class KokoroSession internal constructor(
             current.debugTiming.set(timing)
             current.debugCommandId.set(commandId)
             // Same lock + FIFO writer: CANCEL cannot overtake its SAY.
-            send(current, KokoroProtocol.say(commandId, speechRate, text))
+            send(current, KokoroProtocol.say(commandId, speechRate, text, pitch))
             current
         }
         var totalSamples = 0
@@ -386,7 +387,7 @@ class KokoroSession internal constructor(
                 target.process.errorStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
                     for (line in lines) {
                         if (line.startsWith("ready.")) {
-                            if (!line.contains("protocol=2")) throw IOException("Stale native runtime: protocol v2 required")
+                            if (line.split(' ').none { it == "protocol=3" }) throw IOException("Stale native runtime: protocol v3 required")
                             if (diagnosticsEnabled) {
                                 // Report the binary's own build marker, not just
                                 // the Kotlin app version, to expose stale staging.

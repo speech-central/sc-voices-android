@@ -11,7 +11,16 @@ This Kokoro-first release automatically installs **28 English voices**
 (20 US and 8 UK) at 24 kHz, with Heart as the default.
 
 The application and Android TTS engine use the short display name **SC Kokoro**.
-Package ID: `com.labsii.voices`. Version: **0.6.25 (42)**.
+
+**Pitch:** user-requested ratios 0.76–1.24 use formant-preserving adjustment;
+0.98–1.02 bypass processing. Default pitch keeps the original audio.
+See [pitch listening checks](docs/PITCH_TESTING.md).
+
+Package ID: `com.labsii.voices`. Version: **0.6.27 (44)**.
+
+Requires **Android 11 (API 30)** or newer, matching Speech Central, and an
+ARM64-capable Android system. This is a distribution baseline, not a guarantee
+of sufficient performance; a working OpenCL FP16 driver is also required.
 
 For uninterrupted screen-off reading on affected devices, allow SC Kokoro to
 ignore battery optimization using Edit on the background reading card. The app checks the
@@ -29,7 +38,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for fixes and validation limits.
 - Native Kokoro speech-rate control from Android synthesis requests (0.5x-2.0x)
 - Request-scoped cooperative cancellation with a bounded worker-retirement fallback
 - Kokoro-82M C++/OpenCL source and kernels from adreno-llms
-- Build-time eSpeak NG phonemizer and CLBlast integration
+- Build-time eSpeak NG phonemizer with restored clause-ending punctuation, and CLBlast integration
 - Credits and license texts inside the application
 
 No LLM, VLM, camera, chat, music-generation, MMS-TTS, or Edgi UI code is
