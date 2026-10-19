@@ -39,6 +39,7 @@ class KokoroSessionTest {
         private val destroyGate: CountDownLatch? = null,
         private val failDestroy: Boolean = false,
         private val forceExit: Boolean = false,
+        private val announceReady: Boolean = true,
         val handle: (FakeProcess, String) -> Unit,
     ) : Process() {
         val audio = Pipe()
@@ -54,7 +55,7 @@ class KokoroSessionTest {
             }
             override fun close() { closeGate?.await() }
         }
-        init { event("ready. protocol=3 build=test") }
+        init { if (announceReady) event("ready. protocol=3 build=test") }
         fun event(value: String) = errors.put((value + "\n").toByteArray())
         fun success(id: String) {
             event("KOKORO_PCM_BEGIN $id 2 24000")
@@ -100,14 +101,126 @@ class KokoroSessionTest {
         retirementTimeout: Long = 5000,
         idleTimeout: Long = 120000,
         diagnostics: Boolean = false,
+        startupTimeout: Long = 30_000,
         onBuilder: (ProcessBuilder) -> Unit = {},
         body: suspend (KokoroSession) -> Unit,
     ) {
         val dir = Files.createTempDirectory("kokoro-session-test").toFile()
         File(dir, "libkokoro.so").writeText("fixture")
         val session = KokoroSession(dir.path, dir, { builder -> onBuilder(builder); factory() }, timeout, 50, scheduler,
-            retirementTimeout, idleTimeout, diagnostics)
+            retirementTimeout, idleTimeout, diagnostics, startupTimeout)
         try { body(session) } finally { session.close(); scheduler.shutdownNow(); dir.deleteRecursively() }
+    }
+
+    @Test fun nativeReadinessTimeoutRetiresWorkerAndNextVoiceRecovers() = runBlocking {
+        var starts = 0
+        lateinit var stalled: FakeProcess
+        fixture({
+            starts++
+            FakeProcess(announceReady = starts > 1) { p, line -> p.success(line.split(' ')[1]) }
+                .also { if (starts == 1) stalled = it }
+        }, startupTimeout = 100) { session ->
+            val first = session.beginRequest()
+            try {
+                withTimeout(1000) { session.start(first, "alice", "en-gb") }
+                fail("Expected startup timeout")
+            } catch (failure: KokoroSession.StartupDeadlineException) {
+                assertTrue(failure.message!!.contains("native_ready"))
+            }
+            session.finishRequest(first)
+            assertTrue(stalled.ended.await(1, TimeUnit.SECONDS))
+            val next = session.beginRequest()
+            session.start(next, "heart", "en-us")
+            session.speak(next, "Recovered.", 1f) {}
+            session.finishRequest(next)
+        }
+    }
+
+    @Test fun blockedProcessCreationTimesOutWithoutOverlappingLateWorker() = runBlocking {
+        val launchGate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        val lateExited = CountDownLatch(1)
+        var starts = 0
+        lateinit var late: FakeProcess
+        try {
+            fixture({
+                if (++starts == 1) {
+                    entered.countDown()
+                    launchGate.await()
+                    FakeProcess { p, line -> p.success(line.split(' ')[1]) }.also {
+                        late = it
+                        Thread { it.ended.await(); lateExited.countDown() }.start()
+                    }
+                } else {
+                    assertFalse("Late process must exit before replacement", late.isAlive)
+                    FakeProcess { p, line -> p.success(line.split(' ')[1]) }
+                }
+            }, startupTimeout = 100) { session ->
+                val first = session.beginRequest()
+                try {
+                    withTimeout(1000) { session.start(first, "alice", "en-gb") }
+                    fail("Expected startup timeout")
+                } catch (failure: KokoroSession.StartupDeadlineException) {
+                    assertTrue(entered.await(1, TimeUnit.SECONDS))
+                    assertTrue(failure.message!!.contains("process_create"))
+                }
+                session.finishRequest(first)
+                val blocked = session.beginRequest()
+                try {
+                    session.start(blocked, "heart", "en-us")
+                    fail("Must not overlap a launch whose result is unknown")
+                } catch (failure: IOException) {
+                    assertTrue(failure.message!!.contains("overlapping"))
+                } finally { session.finishRequest(blocked) }
+                assertEquals(1, starts)
+                launchGate.countDown()
+                withContext(Dispatchers.IO) { assertTrue(lateExited.await(1, TimeUnit.SECONDS)) }
+                val recovered = session.beginRequest()
+                session.start(recovered, "heart", "en-us")
+                session.speak(recovered, "Recovered.", 1f) {}
+                session.finishRequest(recovered)
+                assertEquals(2, starts)
+            }
+        } finally { launchGate.countDown() }
+    }
+
+    @Test fun onStopDuringProcessCreationReturnsBeforeLaunchCompletes() = runBlocking {
+        val entered = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        val exited = CountDownLatch(1)
+        try {
+            fixture({
+                entered.countDown(); gate.await()
+                FakeProcess { _, _ -> }.also { process ->
+                    Thread { process.ended.await(); exited.countDown() }.start()
+                }
+            }) { session ->
+                val request = session.beginRequest()
+                supervisorScope {
+                    val starting = async { session.start(request, "alice", "en-gb") }
+                    withContext(Dispatchers.IO) { assertTrue(entered.await(1, TimeUnit.SECONDS)) }
+                    session.requestCancel(request)
+                    try { withTimeout(500) { starting.await() }; fail("Expected cancellation") }
+                    catch (_: IOException) {}
+                    session.finishRequest(request)
+                    gate.countDown()
+                    withContext(Dispatchers.IO) { assertTrue(exited.await(1, TimeUnit.SECONDS)) }
+                }
+            }
+        } finally { gate.countDown() }
+    }
+
+    @Test fun staleStartupTimerCannotRetireSuccessfulWorker() = runBlocking {
+        val timers = ManualDeadlines()
+        val process = FakeProcess { p, line -> p.success(line.split(' ')[1]) }
+        fixture({ process }, scheduler = timers) { session ->
+            val request = session.beginRequest()
+            session.start(request, "alice", "en-gb")
+            timers.tasks.first().run()
+            assertTrue(process.isAlive)
+            session.speak(request, "Still ready.", 1f) {}
+            session.finishRequest(request)
+        }
     }
 
     @Test fun pitchIsPerCommandAndDoesNotRestartWorker() = runBlocking {
@@ -206,7 +319,7 @@ class KokoroSessionTest {
             val first = session.beginRequest()
             session.start(first, "heart", "en-us")
             session.speak(first, "First.", 1f) {}
-            val oldDeadline = scheduler.tasks.first()
+            val oldDeadline = scheduler.tasks.last()
             session.finishRequest(first)
             val next = session.beginRequest()
             session.start(next, "heart", "en-us")

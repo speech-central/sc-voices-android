@@ -10,10 +10,9 @@ import android.util.Log
 import android.os.SystemClock
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.TimeoutCancellationException
 import java.io.DataInputStream
 import java.io.File
@@ -43,16 +42,27 @@ class KokoroSession internal constructor(
     private val retirementTimeoutMs: Long = RETIREMENT_TIMEOUT_MS,
     private val idleTimeoutMs: Long = IDLE_TIMEOUT_MS,
     private val diagnosticsEnabled: Boolean = false,
+    private val startupTimeoutMs: Long = START_TIMEOUT_MS,
 ) {
     enum class GpuPriority(val setting: String) {
         LOW("low"),
     }
+    class StartupDeadlineException(message: String) : IOException(message)
     class InferenceDeadlineException(message: String) : IOException(message)
 
     constructor(context: Context, diagnosticsEnabled: Boolean = false) : this(
         context.applicationInfo.nativeLibraryDir, KokoroModelManager.runtimeDir(context),
         diagnosticsEnabled = diagnosticsEnabled,
     )
+    private class Startup(val request: Request) {
+        val result = CompletableDeferred<Unit>()
+        val finished = AtomicBoolean()
+        val stage = AtomicReference("queued")
+    }
+    private val startupExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "kokoro-startup").apply { isDaemon = true }
+    }
+    private var pendingStartup: Startup? = null // protected by lock
     private val lock = Any()
     private var worker: Worker? = null
     private var active: Request? = null
@@ -156,80 +166,157 @@ class KokoroSession internal constructor(
     suspend fun start(
         request: Request, voicePackPath: String, phonemizerVoice: String,
         priority: GpuPriority = GpuPriority.LOW,
-    ) =
-        withContext(Dispatchers.IO) {
-            // A repaired file must not reuse a worker holding the old contents.
-            val voiceKey = "$voicePackPath|$phonemizerVoice|" +
-                "${File(cwd, voicePackPath).lastModified()}|" +
-                "${File(cwd, "weights/model.fp16.bin").lastModified()}|${priority.setting}"
-            val previous = synchronized(lock) {
-                check(active === request && !closed)
-                worker
-            }
-            if (request.cancelled.get()) return@withContext
-            if (previous != null && previous.voice == voiceKey &&
-                previous.process.isAlive && !previous.retiring.get()) {
-                synchronized(lock) {
-                    if (active === request && !closed && !request.cancelled.get()) bound = previous
-                }
-                return@withContext
-            }
-            // Failed retirement prevents spawning overlapping heavy workers.
-            if (previous != null) {
-                val retirement = retire(previous, "voice change or dead worker")
-                try {
-                    // A past failed retirement is not permanent session state:
-                    // the OS may have completed the exit since that failure.
-                    // Actual process exit, not pipe cleanup or a cached future,
-                    // is the safety gate for a replacement.
-                    if (previous.process.isAlive) {
-                        withTimeout(retirementTimeoutMs.milliseconds) { retirement.await() }
-                    }
-                } catch (timeout: TimeoutCancellationException) {
-                    if (previous.process.isAlive)
-                        throw IOException("Native worker did not retire within ${retirementTimeoutMs}ms", timeout)
-                } catch (failure: Exception) {
-                    if (failure is CancellationException || previous.process.isAlive) throw failure
-                }
-                if (previous.process.isAlive) throw IOException("Native worker is still alive after retirement")
-            }
-            if (request.cancelled.get()) return@withContext
-            require(cwd.isDirectory) { "Kokoro runtime is not installed: $cwd" }
-            val binary = File(nativeLibDir, "libkokoro.so")
-            require(binary.isFile) { "Kokoro native runtime is not packaged: $binary" }
-            val builder = ProcessBuilder(
-                binary.absolutePath, "--serve-stream", "--voice", phonemizerVoice,
-                "--voicepack", voicePackPath,
-            ).directory(cwd)
-            builder.environment().apply {
-                put("LD_LIBRARY_PATH", "$nativeLibDir:/vendor/lib64:/system/lib64")
-                put("NNOPT_GPU_FP32_GENERATOR", "1")
-                put("NNOPT_PRE_ALLOC_WEIGHTS", "1")
-                put("NNOPT_VERIFY_WEIGHTS", "0")
-                put("NNOPT_QCOM_PRIORITY", priority.setting)
-                // Whole-graph replay cannot observe cancellation between blocks.
-                put("NNOPT_RECORD", "0")
-                put("NNOPT_COOPERATIVE", "1")
-                if (diagnosticsEnabled) put("NNOPT_DIAGNOSTICS", "1")
-            }
-            val started = Worker(processFactory(builder), voiceKey)
-            val accepted = synchronized(lock) {
-                if (active !== request || closed || request.cancelled.get()) false
-                else { worker = started; bound = started; true }
-            }
-            if (!accepted) {
-                retire(started, "cancelled during startup").await()
-                return@withContext
-            }
-            startReader(started)
-            try {
-                withTimeout(START_TIMEOUT_MS.milliseconds) { started.ready.await() }
-            } catch (t: Throwable) {
-                retire(started, "startup failed")
-                throw t
-            }
-            if (diagnosticsEnabled) Log.i(TAG, "Kokoro ready: protocol=3 priority=${priority.setting}")
+    ) {
+        if (request.cancelled.get()) return
+        val attempt = synchronized(lock) {
+            check(active === request && !closed)
+            if (request.cancelled.get()) return
+            if (pendingStartup != null) throw IOException(
+                "Previous native startup is still retiring; refusing overlapping launch",
+            )
+            Startup(request).also { pendingStartup = it }
         }
+        val deadline = try {
+            deadlines.schedule({
+                val error = StartupDeadlineException(
+                    "Native startup exceeded ${startupTimeoutMs}ms at ${attempt.stage.get()}",
+                )
+                if (abortStartup(attempt, error)) {
+                    Log.w(TAG, "KOKORO_STARTUP_DEADLINE request=${request.id} " +
+                        "timeoutMs=$startupTimeoutMs stage=${attempt.stage.get()}")
+                }
+            }, startupTimeoutMs, TimeUnit.MILLISECONDS)
+        } catch (failure: Exception) {
+            synchronized(lock) { if (pendingStartup === attempt) pendingStartup = null }
+            throw failure
+        }
+        try {
+            startupExecutor.execute {
+                var failure: Throwable? = null
+                try { runBlocking { startWorker(attempt, voicePackPath, phonemizerVoice, priority) } }
+                catch (error: Throwable) { failure = error }
+                finally {
+                    synchronized(lock) {
+                        if (pendingStartup === attempt) pendingStartup = null
+                        if (attempt.finished.compareAndSet(false, true)) {
+                            if (failure == null) attempt.result.complete(Unit)
+                            else attempt.result.completeExceptionally(failure)
+                        }
+                    }
+                }
+            }
+            attempt.result.await()
+        } catch (failure: Throwable) {
+            abortStartup(attempt, failure)
+            if (failure is java.util.concurrent.RejectedExecutionException) {
+                synchronized(lock) { if (pendingStartup === attempt) pendingStartup = null }
+            }
+            throw failure
+        } finally { deadline.cancel(false) }
+    }
+
+    private fun abortStartup(attempt: Startup, error: Throwable): Boolean = synchronized(lock) {
+        if (!attempt.finished.compareAndSet(false, true)) return@synchronized false
+        if (active === attempt.request) bound?.let { retire(it, "startup aborted: ${attempt.stage.get()}") }
+        attempt.result.completeExceptionally(error)
+        true
+    }
+
+    private fun startupStage(attempt: Startup, stage: String) {
+        attempt.stage.set(stage)
+        if (diagnosticsEnabled) Log.i(TAG, "KOKORO_STARTUP request=${attempt.request.id} stage=$stage " +
+            "elapsedRealtimeMs=${SystemClock.elapsedRealtime()}")
+    }
+
+    private suspend fun startWorker(
+        attempt: Startup, voicePackPath: String, phonemizerVoice: String, priority: GpuPriority,
+    ) {
+        val request = attempt.request
+        fun aborted() = request.cancelled.get() || attempt.finished.get()
+        if (aborted()) return
+        startupStage(attempt, "voice_files")
+        // A repaired file must not reuse a worker holding the old contents.
+        val voiceKey = "$voicePackPath|$phonemizerVoice|" +
+            "${File(cwd, voicePackPath).lastModified()}|" +
+            "${File(cwd, "weights/model.fp16.bin").lastModified()}|${priority.setting}"
+        val previous = synchronized(lock) {
+            check(active === request && !closed)
+            worker
+        }
+        if (aborted()) return
+        if (previous != null && previous.voice == voiceKey &&
+            previous.process.isAlive && !previous.retiring.get()) {
+            synchronized(lock) {
+                if (active === request && !closed && !aborted()) bound = previous
+            }
+            if (aborted()) return
+            startupStage(attempt, "reuse_ready")
+            previous.ready.await()
+            return
+        }
+        // Failed retirement prevents spawning overlapping heavy workers.
+        if (previous != null) {
+            startupStage(attempt, "previous_worker_exit")
+            val retirement = retire(previous, "voice change or dead worker")
+            try {
+                // A past failed retirement is not permanent session state:
+                // the OS may have completed the exit since that failure.
+                // Actual process exit, not pipe cleanup or a cached future,
+                // is the safety gate for a replacement.
+                if (previous.process.isAlive) {
+                    withTimeout(retirementTimeoutMs.milliseconds) { retirement.await() }
+                }
+            } catch (timeout: TimeoutCancellationException) {
+                if (previous.process.isAlive)
+                    throw IOException("Native worker did not retire within ${retirementTimeoutMs}ms", timeout)
+            } catch (failure: Exception) {
+                if (failure is CancellationException || previous.process.isAlive) throw failure
+            }
+            if (previous.process.isAlive) throw IOException("Native worker is still alive after retirement")
+        }
+        if (aborted()) return
+        require(cwd.isDirectory) { "Kokoro runtime is not installed: $cwd" }
+        val binary = File(nativeLibDir, "libkokoro.so")
+        require(binary.isFile) { "Kokoro native runtime is not packaged: $binary" }
+        val builder = ProcessBuilder(
+            binary.absolutePath, "--serve-stream", "--voice", phonemizerVoice,
+            "--voicepack", voicePackPath,
+        ).directory(cwd)
+        builder.environment().apply {
+            put("LD_LIBRARY_PATH", "$nativeLibDir:/vendor/lib64:/system/lib64")
+            put("NNOPT_GPU_FP32_GENERATOR", "1")
+            put("NNOPT_PRE_ALLOC_WEIGHTS", "1")
+            put("NNOPT_VERIFY_WEIGHTS", "0")
+            put("NNOPT_QCOM_PRIORITY", priority.setting)
+            // Whole-graph replay cannot observe cancellation between blocks.
+            put("NNOPT_RECORD", "0")
+            put("NNOPT_COOPERATIVE", "1")
+            if (diagnosticsEnabled) put("NNOPT_DIAGNOSTICS", "1")
+        }
+        if (aborted()) return
+        startupStage(attempt, "process_create")
+        val started = Worker(processFactory(builder), voiceKey)
+        val accepted = synchronized(lock) {
+            // Track even a late launch, so a replacement cannot overlap it.
+            worker = started
+            if (active !== request || closed || aborted()) false
+            else { bound = started; true }
+        }
+        if (!accepted) {
+            retire(started, "cancelled or expired during process creation")
+            return
+        }
+        startupStage(attempt, "native_ready")
+        startReader(started)
+        try {
+            started.ready.await()
+        } catch (t: Throwable) {
+            retire(started, "startup failed")
+            throw t
+        }
+        startupStage(attempt, "ready")
+        if (diagnosticsEnabled) Log.i(TAG, "Kokoro ready: protocol=3 priority=${priority.setting}")
+    }
 
     /** Pipe reads live on the reader thread, so timeout also covers partial PCM. */
     suspend fun speak(
@@ -322,6 +409,9 @@ class KokoroSession internal constructor(
     fun requestCancel(request: Request) = synchronized(lock) {
         request.cancelled.set(true)
         if (active !== request || closed) return@synchronized
+        pendingStartup?.takeIf { it.request === request }?.let {
+            abortStartup(it, IOException("Startup cancelled by Android onStop"))
+        }
         val target = bound ?: return@synchronized
         if (request.fallback == null) {
             request.fallback = deadlines.schedule({
@@ -346,6 +436,8 @@ class KokoroSession internal constructor(
     /** Teardown is non-blocking; retirement owns the captured process. */
     fun close() = synchronized(lock) {
         closed = true
+        pendingStartup?.let { abortStartup(it, IOException("Session closed during startup")) }
+        startupExecutor.shutdownNow()
         active?.cancelled?.set(true)
         active?.fallback?.cancel(false)
         worker?.let { retire(it, "service destroyed") }
@@ -412,6 +504,9 @@ class KokoroSession internal constructor(
                         } else if (line.startsWith("KOKORO_TIMING ")) {
                             // Internal debug protocol record, never log text or per-chunk data.
                             target.debugTiming.get()?.acceptNative(line, target.debugCommandId.get())
+                        } else if (line.startsWith("KOKORO_STARTUP ") && diagnosticsEnabled) {
+                            target.lastNativeStage.set(line)
+                            Log.i(TAG, "$line worker=${System.identityHashCode(target.process)}")
                         } else if (line.startsWith("KOKORO_STAGE ") && diagnosticsEnabled) {
                             val stage = "$line worker=${System.identityHashCode(target.process)} " +
                                 "receivedElapsedMs=${SystemClock.elapsedRealtime()}"
@@ -486,7 +581,7 @@ class KokoroSession internal constructor(
 
     companion object {
         private const val TAG = "KokoroSession"
-        private const val START_TIMEOUT_MS = 120_000L
+        private const val START_TIMEOUT_MS = 30_000L
         private const val SYNTHESIS_TIMEOUT_MS = 120_000L
         private const val CANCEL_FALLBACK_MS = 2_500L
         private const val RETIREMENT_TIMEOUT_MS = 5_000L

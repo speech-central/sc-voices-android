@@ -25,7 +25,6 @@ import com.labsii.voices.BuildConfig
 import com.labsii.voices.runner.KokoroModelManager
 import com.labsii.voices.runner.KokoroPitch
 import com.labsii.voices.runner.KokoroSession
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
 import java.util.Locale
@@ -205,7 +204,7 @@ class AdrenoTtsService : TextToSpeechService() {
             val startupStartedNs = if (debug != null) System.nanoTime() else 0L
             val startupStartedRealMs = if (debug != null) SystemClock.elapsedRealtime() else 0L
             try {
-                runBlocking(Dispatchers.IO) {
+                runBlocking {
                     session.start(current, voice.voicePackPath, voice.phonemizerVoice,
                         KokoroSession.GpuPriority.LOW)
                 }
@@ -270,7 +269,7 @@ class AdrenoTtsService : TextToSpeechService() {
                         recoveryAttempted = true
                         Log.w(TAG, "Kokoro inference deadline id=${current.id}, chunk=$chunkIndex/$chunkCount; " +
                             "retiring worker and retrying once at low GPU priority")
-                        runBlocking(Dispatchers.IO) {
+                        runBlocking {
                             session.start(current, voice.voicePackPath, voice.phonemizerVoice,
                                 KokoroSession.GpuPriority.LOW)
                         }

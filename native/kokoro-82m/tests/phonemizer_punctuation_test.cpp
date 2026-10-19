@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Integration test: real eSpeak NG 1.52 + the shipped English data and vocabulary.
 #include "phonemizer.h"
+#include <espeak-ng/speak_lib.h>
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -30,6 +31,12 @@ int main(int argc, char** argv) {
         const char* voice = argv[3];
         nnopt_tts::Phonemizer ph;
         require(ph.init(argv[1], argv[2], voice), "initialize phonemizer");
+        const auto* selected = espeak_GetCurrentVoice();
+        require(selected && selected->identifier, "selected voice metadata");
+        const std::string selected_id = selected->identifier;
+        const std::string expected = std::string(voice) == "en-gb" ? "gmw/en" : "gmw/en-US";
+        require(selected_id == expected, "expected voice identifier " + expected + ", got " + selected_id);
+        std::cout << "Selected " << selected_id << '\n';
         const auto expect = [&](const std::string& text, const Ids& expected) {
             const auto ids = ph.phonemize(text);
             require(!ids.empty() && ids.front() == 0 && ids.back() == 0, "BOS/EOS: " + text);

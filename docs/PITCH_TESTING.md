@@ -1,7 +1,8 @@
-# Pitch listening check — 0.6.27 (44)
+# Pitch listening check — introduced in 0.6.27 (44)
 
 Build the source in Android Studio and install as usual. The native ready
-banner must report `protocol=3 build=0.6.27`; an old v2 worker is rejected
+banner must report `protocol=3 build=0.6.28` for the current test build;
+an old v2 worker is rejected
 rather than treating the new pitch number as text. Verified model downloads
 can be reused. The vendored pitch dependency needs no separate download.
 

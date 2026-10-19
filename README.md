@@ -16,7 +16,7 @@ The application and Android TTS engine use the short display name **SC Kokoro**.
 0.98–1.02 bypass processing. Default pitch keeps the original audio.
 See [pitch listening checks](docs/PITCH_TESTING.md).
 
-Package ID: `com.labsii.voices`. Version: **0.6.27 (44)**.
+Package ID: `com.labsii.voices`. Version: **0.6.28 (45)**.
 
 Requires **Android 11 (API 30)** or newer, matching Speech Central, and an
 ARM64-capable Android system. This is a distribution baseline, not a guarantee
@@ -79,7 +79,9 @@ background execution. Cooperative cancellation, non-overlapping worker
 retirement, memory budgets, scratch reclamation and idle cleanup remain enabled.
 GPU priority stays low for interface responsiveness. Detailed diagnostics are
 limited to debug builds; release logs retain failures and deadline warnings.
-For developer troubleshooting only, see [the capture guide](docs/SCREEN_OFF_DIAGNOSTICS.md).
+Native startup has a separate 30-second deadline, including process creation.
+For developer troubleshooting, see [startup and British-voice testing](docs/STARTUP_TESTING.md)
+and [the screen-off capture guide](docs/SCREEN_OFF_DIAGNOSTICS.md).
 
 ## Build
 

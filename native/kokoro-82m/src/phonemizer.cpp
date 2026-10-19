@@ -1,6 +1,7 @@
 // On-device G2P phonemizer + chunker. See phonemizer.h. NO Python, NO network.
 
 #include "phonemizer.h"
+#include "startup_diagnostics.h"
 
 // Compiled only when espeak-ng is vendored + linked (CMake defines
 // NNOPT_TTS_STREAMING). Without it this TU is empty so the existing build is
@@ -228,8 +229,10 @@ Phonemizer::~Phonemizer() {
 bool Phonemizer::init(const std::string& espeak_data_parent,
                       const std::string& vocab_tsv,
                       const std::string& voice) {
+    startup_marker("espeak_init_begin");
     int sr = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, /*buflength=*/0,
                                espeak_data_parent.c_str(), /*options=*/0);
+    startup_marker("espeak_init_end");
     if (sr < 0) {
         std::fprintf(stderr,
                      "FATAL Phonemizer: espeak_Initialize failed (path=%s). Is "
@@ -240,6 +243,7 @@ bool Phonemizer::init(const std::string& espeak_data_parent,
     // The downloaded British voice is named "en". "en-gb" is its language
     // tag, which eSpeak NG 1.52's name-based lookup does not resolve.
     const char* espeak_voice = voice == "en-gb" ? "en" : voice.c_str();
+    startup_marker("espeak_voice_begin", espeak_voice);
     if (espeak_SetVoiceByName(espeak_voice) != EE_OK) {
         std::fprintf(stderr, "FATAL Phonemizer: espeak voice '%s' not found.\n",
                      voice.c_str());
@@ -247,6 +251,9 @@ bool Phonemizer::init(const std::string& espeak_data_parent,
         return false;
     }
 
+    const auto* selected = espeak_GetCurrentVoice();
+    startup_marker("espeak_voice_end", selected && selected->identifier ? selected->identifier : "unknown");
+    startup_marker("vocab_begin");
     std::ifstream in(vocab_tsv);
     if (!in) {
         std::fprintf(stderr, "FATAL Phonemizer: cannot open vocab tsv %s\n",
@@ -274,6 +281,7 @@ bool Phonemizer::init(const std::string& espeak_data_parent,
     std::sort(vocab_.begin(), vocab_.end(),
               [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
 
+    startup_marker("vocab_end");
     ready_ = true;
     std::fprintf(stderr, "Phonemizer ready: espeak sr=%d, %zu phonemes, voice=%s\n",
                  sr, vocab_.size(), voice.c_str());

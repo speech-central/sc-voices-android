@@ -1,3 +1,29 @@
+# 0.6.28 — Bound native startup and trace British voice initialization
+
+- Apply a 30-second startup deadline before setup begins, covering voice-file
+  metadata, previous-worker retirement, process creation and native readiness.
+  Previously the 120-second coroutine timeout covered only native readiness;
+  the adaptive inference watchdog did not run during startup.
+- Run blocking startup on a dedicated thread. Timeout and Android onStop can
+  release the synthesis caller without waiting for process creation to return.
+  Track and retire a process that arrives after cancellation or timeout, and
+  refuse overlapping launches until the earlier startup/worker has retired.
+- Add debug-only startup markers for OpenCL, weights, voice-pack loading and
+  eSpeak initialization, actual voice selection and vocabulary loading.
+- Preserve low GPU priority, neutral-pitch bypass and existing inference
+  recovery. No engine wake lock or foreground service is added.
+
+Validation: all 27 JVM tests pass, including startup timeout, cancellation,
+late-process retirement, recovery and stale-timer isolation. Production Kotlin
+compiles against Android/AndroidX stand-ins. Changed native files compile and
+link into the full host executable. The pinned eSpeak NG 1.52.0 library and
+checksum-verified English data pass US and British integration checks; the
+British voice identifier is verified as `gmw/en`.
+
+This fixes a confirmed timeout-coverage gap, not a proven cause of the reported
+British-voice stall. A complete Android APK build and device test remain needed.
+See [startup testing](docs/STARTUP_TESTING.md).
+
 # 0.6.27 — Formant-preserving pitch trial
 
 - Honor Android synthesis pitch requests, clamped to 0.76–1.24. Ratios are

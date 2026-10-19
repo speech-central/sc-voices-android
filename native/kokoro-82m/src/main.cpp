@@ -82,6 +82,7 @@ extern "C" size_t nnopt_gen_scratch_retained_bytes();
 #include "cancellation.h"
 #include "stream_commands.h"
 #include "tts_gpu_guard.h"
+#include "startup_diagnostics.h"
 
 // Read prompt input ids from a binary file (int32 little-endian) when the
 // caller passes \`--token-ids /path/to/test_input_ids.bin\`. This path is
@@ -156,7 +157,7 @@ static bool probe_kokoro_opencl(OpenCLContext& cl_ctx, std::string& reason) {
 int main(int argc, char** argv) {
     // Build marker — lets us confirm from the engine log which binary is
     // actually running. Bump the tag on every device-facing engine change.
-    fprintf(stderr, "[engine] kokoro build: 0.6.27 protocol=3\n");
+    fprintf(stderr, "[engine] kokoro build: 0.6.28 protocol=3\n");
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
     // Argument parsing: positional "prompt" + optional flags.
@@ -231,6 +232,7 @@ int main(int argc, char** argv) {
     BenchmarkTimer& bench = BenchmarkTimer::instance();
     bench.mark_inference_start();
 
+    startup_marker("opencl_begin");
     OpenCLContext cl_ctx;
     if (!cl_ctx.initialize()) {
         if (device_info_mode) {
@@ -239,6 +241,7 @@ int main(int argc, char** argv) {
         NNOPT_ERROR("OpenCL init failed");
         return 1;
     }
+    startup_marker("opencl_end");
     if (device_info_mode) {
         std::cout << "KOKORO_DEVICE " << cl_ctx.device_name()
                   << " · " << cl_ctx.device_version() << std::endl;
@@ -264,10 +267,13 @@ int main(int argc, char** argv) {
     const char* nnopt_weights_bin  = "weights/model.bin";
     const char* nnopt_weights_meta = "weights/model.meta.json";
 #endif
+    startup_marker("weights_load_begin");
     if (!weights.load(nnopt_weights_bin, nnopt_weights_meta, cl_ctx.context())) {
         NNOPT_ERROR_FMT("weights load failed: %s", nnopt_weights_bin);
         return 1;
     }
+
+    startup_marker("weights_load_end");
 
     // Pre-allocate all GPU buffers upfront so the first inference doesn't pay
     // ~5s of per-tensor allocation cost spread across its kernel launches.
@@ -276,12 +282,14 @@ int main(int argc, char** argv) {
         const char* env = std::getenv("NNOPT_PRE_ALLOC_WEIGHTS");
         bool pre_alloc = !env || env[0] != '0';
         if (pre_alloc) {
+            startup_marker("weights_gpu_begin");
             std::fprintf(stderr, "[engine] GPU weight preallocation begin\n");
             std::fflush(stderr);
             if (!weights.pre_allocate_all()) {
                 NNOPT_ERROR("GPU weight preallocation failed; insufficient device memory");
                 return 6;
             }
+            startup_marker("weights_gpu_end");
             std::fprintf(stderr, "[engine] GPU weight preallocation end\n");
             std::fflush(stderr);
         }
@@ -289,6 +297,7 @@ int main(int argc, char** argv) {
 
     Sampler sampler(sampler_config);
 
+    startup_marker("model_init_begin");
     Model model(cl_ctx, weights);
     if (!model.initialize()) {
         NNOPT_ERROR("Model::initialize() failed — see prior NNOPT_ERROR for the layer that failed");
@@ -296,6 +305,8 @@ int main(int argc, char** argv) {
     }
 
 
+
+    startup_marker("model_init_end");
 
     // ── Streaming server mode (--serve) ──────────────────────────────────
     // Persistent process: weights + CL context stay hot across utterance
@@ -447,17 +458,22 @@ int main(int argc, char** argv) {
             const char* value = std::getenv("NNOPT_DIAGNOSTICS");
             return value && value[0] == '1';
         }();
+        startup_marker("voice_pack_begin", voicepack.c_str());
         auto vp = load_float_bin(voicepack.c_str());
         if (vp.size() != 510u * 256u) {
             NNOPT_ERROR_FMT("voice_pack %s size %zu != 510*256", voicepack.c_str(), vp.size());
             return 5;
         }
+        startup_marker("voice_pack_end");
+        startup_marker("phonemizer_begin", voice.c_str());
         nnopt_tts::Phonemizer ph;
         if (!ph.init(/*espeak_data_parent=*/"assets", "assets/phoneme_vocab.tsv", voice))
             return 5;
 
+        startup_marker("phonemizer_end", voice.c_str());
+
         // Protocol v3 pairs every audio/terminal frame with a command ID.
-        std::fprintf(stderr, "ready. protocol=3 build=0.6.27\n");
+        std::fprintf(stderr, "ready. protocol=3 build=0.6.28\n");
         std::fflush(stderr);
         TtsCommandReader reader(STDIN_FILENO);
         TtsCommand command;
