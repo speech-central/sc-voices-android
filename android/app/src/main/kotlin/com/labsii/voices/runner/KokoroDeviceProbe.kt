@@ -5,7 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
-import java.util.Collections
+import android.util.Log
 import kotlin.concurrent.thread
 
 /** Reads the renderer from the same OpenCL runtime used for synthesis. */
@@ -14,12 +14,13 @@ object KokoroDeviceProbe {
         val compatible: Boolean,
         val renderer: String? = null,
         val reason: String? = null,
-        val conclusive: Boolean = true,
+        val diagnostics: String = "",
     )
 
     suspend fun probe(context: Context): Result = withContext(Dispatchers.IO) {
         val binary = File(context.applicationInfo.nativeLibraryDir, "libkokoro.so")
         if (!binary.isFile) return@withContext Result(false, reason = "Kokoro runtime is not packaged")
+        val captured = KokoroProbeOutput()
         runCatching {
             val runtimeDir = KokoroModelManager.runtimeDir(context).apply { mkdirs() }
             val process = ProcessBuilder(binary.absolutePath, "--device-info")
@@ -32,45 +33,29 @@ object KokoroDeviceProbe {
                 .start()
             // Drain while the probe runs, otherwise a verbose driver can fill
             // its pipe and turn a successful probe into an artificial timeout.
-            val captured = Collections.synchronizedList(mutableListOf<String>())
             val reader = thread(name = "kokoro-device-probe", isDaemon = true) {
                 runCatching {
                     process.inputStream.bufferedReader().useLines { lines ->
                         lines.forEach { line ->
-                            if (line.startsWith("KOKORO_") && captured.size < 16) captured.add(line.take(4096))
+                            captured.accept(line)
                         }
                     }
                 }
             }
+            var timedOut = false
             try {
-                if (!process.waitFor(20, TimeUnit.SECONDS)) {
-                    return@runCatching Result(false, reason = "OpenCL check timed out; real synthesis can still be tried", conclusive = false)
-                }
-                reader.join(1000)
+                timedOut = !process.waitFor(20, TimeUnit.SECONDS)
             } finally {
                 if (process.isAlive) { process.destroyForcibly(); process.waitFor(2, TimeUnit.SECONDS) }
+                reader.join(1000)
             }
-            val lines = synchronized(captured) { captured.toList() }
-            val renderer = lines
-                .firstOrNull { it.startsWith("KOKORO_DEVICE ") }
-                ?.removePrefix("KOKORO_DEVICE ")
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-            val compatibility = lines
-                .firstOrNull { it.startsWith("KOKORO_COMPATIBLE ") }
-                ?.removePrefix("KOKORO_COMPATIBLE ")
-            Result(
-                compatible = compatibility?.startsWith("1") == true,
-                conclusive = compatibility != null,
-                renderer = renderer,
-                reason = compatibility
-                    ?.takeIf { it.startsWith("0") }
-                    ?.removePrefix("0")
-                    ?.trim()
-                    ?.takeIf { it.isNotEmpty() },
-            )
+            if (process.isAlive) throw java.io.IOException("OpenCL probe did not stop after its deadline")
+            captured.result(process.exitValue(), if (timedOut) "OpenCL check timed out; real synthesis will still be tried." else null)
+
         }.getOrElse {
-            Result(false, reason = "OpenCL compatibility check could not complete", conclusive = false)
+            captured.result(null, "OpenCL compatibility check could not complete: ${it.message ?: it.javaClass.simpleName}")
+        }.also { result ->
+            if (!result.compatible) Log.w("KokoroDeviceProbe", "${result.reason}\n${result.diagnostics}")
         }
     }
 }

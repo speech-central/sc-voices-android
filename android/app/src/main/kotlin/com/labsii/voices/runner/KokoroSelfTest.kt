@@ -31,6 +31,8 @@ internal object KokoroSelfTest {
                 val voice = tts.voices?.firstOrNull { it.name == KokoroVoices.all.first().voiceName }
                     ?: throw IOException("The installed Kokoro voice is not advertised by Android")
                 if (tts.setVoice(voice) != TextToSpeech.SUCCESS) throw IOException("Could not select the Kokoro voice")
+                tts.setSpeechRate(1.0f)
+                tts.setPitch(1.0f)
                 tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(id: String?) = Unit
                     override fun onAudioAvailable(id: String?, audio: ByteArray?) {
@@ -48,6 +50,9 @@ internal object KokoroSelfTest {
                     @Deprecated("Android legacy callback")
                     override fun onError(id: String?) {
                         if (id == utteranceId) finished.completeExceptionally(IOException("Kokoro synthesis failed on this driver"))
+                    }
+                    override fun onError(id: String?, errorCode: Int) {
+                        if (id == utteranceId) finished.completeExceptionally(IOException("Kokoro synthesis failed (Android error $errorCode)"))
                     }
                     override fun onStop(id: String?, interrupted: Boolean) {
                         if (id == utteranceId) finished.completeExceptionally(IOException("Compatibility test interrupted; retry when reading has stopped"))

@@ -84,7 +84,12 @@ bool OpenCLContext::initialize_selected() {
         if (pe[0] == '1') fprintf(stderr, "CL_DEVICE_EXTENSIONS: %s\n", ext_str.c_str());
     }
 
-    std::vector<cl_context_properties> props;
+    std::vector<cl_context_properties> props = {
+        CL_CONTEXT_PLATFORM, reinterpret_cast<cl_context_properties>(platform_),
+    };
+    const cl_context_properties defaults[] = {
+        CL_CONTEXT_PLATFORM, reinterpret_cast<cl_context_properties>(platform_), 0,
+    };
     if (has_perf_hint) {
         props.push_back(CL_CONTEXT_PERF_HINT_QCOM);
         props.push_back(CL_PERF_HINT_HIGH_QCOM);
@@ -110,17 +115,23 @@ bool OpenCLContext::initialize_selected() {
         context_ = clCreateContext(props.data(), 1, &device_, nullptr, nullptr, &err);
         if (err != CL_SUCCESS) {
             fprintf(stderr, "[opencl_context] QCOM context hints rejected (%d); using defaults\n", err);
-            context_ = clCreateContext(nullptr, 1, &device_, nullptr, nullptr, &err);
+            context_ = clCreateContext(defaults, 1, &device_, nullptr, nullptr, &err);
         }
     } else {
-        context_ = clCreateContext(nullptr, 1, &device_, nullptr, nullptr, &err);
+        context_ = clCreateContext(defaults, 1, &device_, nullptr, nullptr, &err);
     }
-    if (err != CL_SUCCESS) return false;
+    if (err != CL_SUCCESS || !context_) {
+        fprintf(stderr, "KOKORO_OPENCL context creation failed code=%d\n", err);
+        return false;
+    }
 
     const char* profile = std::getenv("NNOPT_PROFILE");
     queue_ = clCreateCommandQueue(context_, device_,
         (profile && profile[0] == '1') ? CL_QUEUE_PROFILING_ENABLE : 0, &err);
-    if (err != CL_SUCCESS) return false;
+    if (err != CL_SUCCESS || !queue_) {
+        fprintf(stderr, "KOKORO_OPENCL queue creation failed code=%d\n", err);
+        return false;
+    }
 
     // Execute and read back FP16 on the actual selected device, not just an
     // advertised extension. A failed candidate lets initialize() try the next.
@@ -128,8 +139,20 @@ bool OpenCLContext::initialize_selected() {
         "#pragma OPENCL EXTENSION cl_khr_fp16 : enable\n"
         "__kernel void fp16_probe(__global half* x) { x[0] = (half)1.0f; }\n";
     cl_program probe = clCreateProgramWithSource(context_, 1, &probe_src, nullptr, &err);
-    if (!probe) return false;
+    if (!probe) {
+        fprintf(stderr, "KOKORO_OPENCL fp16 program creation failed code=%d\n", err);
+        return false;
+    }
     err = clBuildProgram(probe, 1, &device_, "", nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t size = 0;
+        clGetProgramBuildInfo(probe, device_, CL_PROGRAM_BUILD_LOG, 0, nullptr, &size);
+        if (size > 0 && size < 1024 * 1024) {
+            std::vector<char> log(size + 1, 0);
+            if (clGetProgramBuildInfo(probe, device_, CL_PROGRAM_BUILD_LOG, size, log.data(), nullptr) == CL_SUCCESS)
+                fprintf(stderr, "KOKORO_OPENCL fp16 build failed code=%d: %.*s\n", err, 2048, log.data());
+        }
+    }
     cl_kernel kernel = err == CL_SUCCESS ? clCreateKernel(probe, "fp16_probe", &err) : nullptr;
     cl_mem output = kernel ? clCreateBuffer(context_, CL_MEM_READ_WRITE, sizeof(cl_half), nullptr, &err) : nullptr;
     const size_t one = 1;
@@ -140,7 +163,10 @@ bool OpenCLContext::initialize_selected() {
     if (output) clReleaseMemObject(output);
     if (kernel) clReleaseKernel(kernel);
     clReleaseProgram(probe);
-    if (err != CL_SUCCESS || value != 0x3c00) return false;
+    if (err != CL_SUCCESS || value != 0x3c00) {
+        fprintf(stderr, "KOKORO_OPENCL fp16 execution/readback failed code=%d value=%u\n", err, (unsigned)value);
+        return false;
+    }
 
     // ── One-time device banner (matches mms-tts format). Always shown — it's
     // small + useful. Debug builds additionally dump the full extensions list.
@@ -320,7 +346,7 @@ cl_program OpenCLContext::build_program_from_file(const std::string& path, const
 }
 
 std::string OpenCLContext::device_name() const {
-    char name[256];
+    char name[256] = {0};
     clGetDeviceInfo(device_, CL_DEVICE_NAME, sizeof(name), name, nullptr);
     return std::string(name);
 }

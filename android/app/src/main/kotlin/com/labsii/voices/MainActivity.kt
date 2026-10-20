@@ -6,6 +6,10 @@
 package com.labsii.voices
 
 import android.app.Activity
+import android.app.Dialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.os.Build
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Typeface
@@ -19,6 +23,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.progressindicator.LinearProgressIndicator
@@ -58,7 +63,11 @@ class MainActivity : Activity() {
     private val preferences by lazy { getSharedPreferences("onboarding", MODE_PRIVATE) }
     private var onboardingComplete = false
     private var selfTestPassed = false
-    private var needsSelfTest = false
+    private var testingDevice = false
+    private var meteredPromptShown = false
+    private var meteredDialog: Dialog? = null
+    private lateinit var diagnosticsButton: MaterialButton
+    private var diagnosticText = ""
     private val backgroundReadingCards = mutableListOf<Pair<TextView, MaterialButton>>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,21 +76,10 @@ class MainActivity : Activity() {
         manager = KokoroModelManager.get(applicationContext)
         setContentView(buildUi())
         statusView.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        scope.launch {
-            val probe = KokoroDeviceProbe.probe(applicationContext)
-            if (!probe.compatible && probe.conclusive) {
-                renderUnsupportedDevice(probe)
-                return@launch
-            }
-            detectedRenderer = probe.renderer
-            needsSelfTest = !probe.compatible || probe.renderer?.contains("Adreno", ignoreCase = true) != true
-            selfTestPassed = preferences.getString("tested_generation", null) == testGeneration()
-            if (needsSelfTest) {
-                downloadDescriptionView.text = "This OpenCL FP16 device is experimental. We will download the model and try real synthesis; compatibility and speed are not guaranteed."
-            }
-            launch { manager.state.collect { renderState(it) } }
-            manager.ensureInstalled()
-        }
+        detectedRenderer = preferences.getString("tested_renderer", null)
+        selfTestPassed = preferences.getString("tested_generation", null) == testGeneration()
+        scope.launch { manager.state.collect { renderState(it) } }
+        manager.ensureInstalled()
     }
 
     override fun onPostResume() {
@@ -90,6 +88,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        meteredDialog?.dismiss()
         scope.cancel()
         super.onDestroy()
     }
@@ -127,7 +126,7 @@ class MainActivity : Activity() {
 
     private fun buildDownloadScreen(): LinearLayout = screen().apply {
         addView(card(matchParams()) { cardContent ->
-            downloadTitleView = sectionTitle("Checking compatibility")
+            downloadTitleView = sectionTitle("Download Kokoro")
             cardContent.addView(downloadTitleView)
             downloadDescriptionView = bodyText(
                 "Kokoro must be downloaded from the internet once before it can speak. " +
@@ -145,7 +144,7 @@ class MainActivity : Activity() {
                 gravity = Gravity.TOP
                 setPadding(0, dp(14), 0, 0)
             }
-            statusView = bodyText("Checking OpenCL FP16 support…").apply {
+            statusView = bodyText("Checking installed files…").apply {
                 setPadding(0, 0, dp(12), 0)
             }
             progressTextRow.addView(statusView, weightedParams())
@@ -165,6 +164,16 @@ class MainActivity : Activity() {
                 setOnClickListener { manager.retry() }
             }
             cardContent.addView(retryButton, matchParams(top = 20))
+            diagnosticsButton = outlinedButton("Copy diagnostics").apply {
+                visibility = View.GONE
+                setOnClickListener {
+                    getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                        ClipData.newPlainText("SC Kokoro device test", diagnosticText),
+                    )
+                    Toast.makeText(this@MainActivity, "Diagnostics copied", Toast.LENGTH_SHORT).show()
+                }
+            }
+            cardContent.addView(diagnosticsButton, matchParams(top = 12))
         })
     }
 
@@ -349,8 +358,14 @@ class MainActivity : Activity() {
     }
 
     private suspend fun renderState(state: KokoroModelManager.State) {
+        if (state !is KokoroModelManager.State.WaitingForMeteredApproval) {
+            meteredDialog?.dismiss()
+            meteredDialog = null
+        }
+        diagnosticsButton.visibility = View.GONE
         when (state) {
             KokoroModelManager.State.NotInstalled, KokoroModelManager.State.Preparing -> {
+                meteredPromptShown = false
                 showScreen(downloadScreen)
                 downloadTitleView.text = "Download Kokoro"
                 progressBar.visibility = View.VISIBLE
@@ -370,61 +385,101 @@ class MainActivity : Activity() {
                     "${formatBytes(state.bytesDone)} of ${formatBytes(state.bytesTotal)}"
                 progressPercentView.text = "${state.progress}%"
             }
+            KokoroModelManager.State.WaitingForNetwork -> {
+                showDownloadAction(
+                    "Internet connection needed",
+                    "Connect to Wi-Fi or mobile data to download the model and voices. Saved download progress will be reused.",
+                    "Retry download",
+                ) { manager.retry() }
+            }
+            is KokoroModelManager.State.WaitingForMeteredApproval -> {
+                showDownloadAction(
+                    "Download when you're ready",
+                    "This connection is metered. Up to ${formatBytes(state.remainingBytes)} remains to download. You can download now or return on Wi-Fi; saved progress will be reused.",
+                    "Download",
+                ) { confirmMeteredDownload(state.remainingBytes) }
+                if (!meteredPromptShown) confirmMeteredDownload(state.remainingBytes)
+            }
             KokoroModelManager.State.Ready -> {
-                if (!selfTestPassed && needsSelfTest) {
+                if (!selfTestPassed) {
+                    if (testingDevice) return
+                    testingDevice = true
                     showScreen(downloadScreen)
-                    downloadTitleView.text = "Testing this OpenCL device"
+                    downloadTitleView.text = "Testing this device"
+                    downloadDescriptionView.text = "The voice files are installed. We will now check whether this device can generate speech."
                     statusView.text = "Running a short, silent synthesis test. The first run may take a little longer."
                     progressPercentView.text = ""
                     progressBar.visibility = View.VISIBLE
                     progressBar.isIndeterminate = true
                     retryButton.visibility = View.GONE
+                    var probe: KokoroDeviceProbe.Result? = null
                     try {
+                        probe = KokoroDeviceProbe.probe(applicationContext)
+                        detectedRenderer = probe.renderer
+                        // A lightweight probe failure must not prevent a real attempt.
                         KokoroSelfTest.run(applicationContext)
                         selfTestPassed = true
-                        preferences.edit().putString("tested_generation", testGeneration()).apply()
+                        preferences.edit {
+                            putString("tested_generation", testGeneration())
+                            putString("tested_renderer", detectedRenderer)
+                        }
                     } catch (failure: Exception) {
                         if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
-                        downloadTitleView.text = "Device test did not complete"
-                        statusView.text = "Models are installed. ${failure.message}. You may retry; experimental hardware is not blocked from trying synthesis."
-                        progressBar.visibility = View.GONE
-                        retryButton.text = "Retry device test"
-                        retryButton.visibility = View.VISIBLE
-                        retryButton.setOnClickListener { scope.launch { renderState(KokoroModelManager.State.Ready) } }
+                        diagnosticText = listOfNotNull(
+                            "SC Kokoro ${BuildConfig.VERSION_NAME}",
+                            "Device: ${Build.MANUFACTURER} ${Build.MODEL}; Android ${Build.VERSION.RELEASE}",
+                            "Build: ${Build.FINGERPRINT}",
+                            "Renderer: ${probe?.renderer ?: "not detected"}",
+                            "Synthesis: ${failure.message ?: failure.javaClass.simpleName}",
+                            probe?.reason,
+                            probe?.diagnostics,
+                        ).joinToString("\n")
+                        showDownloadAction(
+                            "Speech test did not complete",
+                            "Models are installed, but speech could not be verified. " +
+                                (probe?.reason ?: failure.message ?: "The engine did not complete the test.") +
+                                " You can retry without downloading again. Installed voices remain available to other apps.",
+                            "Retry device test",
+                        ) { scope.launch { renderState(KokoroModelManager.State.Ready) } }
+                        diagnosticsButton.visibility = View.VISIBLE
                         return
+                    } finally {
+                        testingDevice = false
                     }
                 }
                 showScreen(if (onboardingComplete) readyScreen else experienceScreen)
                 renderDeviceExperience(detectedRenderer)
             }
             is KokoroModelManager.State.Failed -> {
-                showScreen(downloadScreen)
-                progressBar.isIndeterminate = false
-                progressBar.visibility = View.GONE
-                retryButton.visibility = View.VISIBLE
-                downloadTitleView.text = "Download could not complete"
-                retryButton.text = "Retry download"
-                retryButton.setOnClickListener { manager.retry() }
-                statusView.text = state.message
-                progressPercentView.text = ""
+                showDownloadAction("Download could not complete", state.message, "Retry download") { manager.retry() }
             }
         }
     }
 
-    private fun renderUnsupportedDevice(probe: KokoroDeviceProbe.Result) {
+    private fun showDownloadAction(title: String, message: String, action: String, onClick: () -> Unit) {
         showScreen(downloadScreen)
-        downloadTitleView.text = "Unsupported device"
-        downloadDescriptionView.text =
-            "SC Kokoro requires a compatible OpenCL device with working fp16 support. " +
-                "The model will not be downloaded on this device."
+        downloadTitleView.text = title
         progressBar.isIndeterminate = false
         progressBar.visibility = View.GONE
         progressPercentView.text = ""
-        retryButton.visibility = View.GONE
-        statusView.text = listOfNotNull(
-            probe.renderer?.let { "Detected OpenCL device: $it" },
-            probe.reason,
-        ).joinToString("\n").ifBlank { "No compatible OpenCL device was detected." }
+        statusView.text = message
+        retryButton.text = action
+        retryButton.visibility = View.VISIBLE
+        retryButton.setOnClickListener { onClick() }
+    }
+
+    private fun confirmMeteredDownload(remainingBytes: Long) {
+        if (meteredDialog?.isShowing == true || isFinishing || isDestroyed) return
+        meteredPromptShown = true
+        meteredDialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Download using this connection?")
+            .setMessage(
+                "Voice files need up to ${formatBytes(remainingBytes)} more. " +
+                    "This connection is metered, so mobile data or other charges may apply.",
+            )
+            .setPositiveButton("Download") { _, _ -> manager.retry(allowMetered = true) }
+            .setNegativeButton("Not now", null)
+            .show()
     }
 
     private fun showScreen(screen: View) {
@@ -435,7 +490,7 @@ class MainActivity : Activity() {
     }
 
     private fun testGeneration(): String =
-        "${BuildConfig.VERSION_NAME}:${packageManager.getPackageInfo(packageName, 0).lastUpdateTime}:$detectedRenderer"
+        "${BuildConfig.VERSION_NAME}:${packageManager.getPackageInfo(packageName, 0).lastUpdateTime}:${Build.FINGERPRINT}"
 
     private fun openSpeechCentral() {
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SPEECH_CENTRAL_URL)))
@@ -491,7 +546,7 @@ class MainActivity : Activity() {
         LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
 
     private fun formatBytes(bytes: Long): String =
-        String.format(Locale.US, "%.1f MiB", bytes / (1024.0 * 1024.0))
+        String.format(Locale.US, "%.1f MB", bytes / 1_000_000.0)
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 

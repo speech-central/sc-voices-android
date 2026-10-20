@@ -16,7 +16,7 @@ The application and Android TTS engine use the short display name **SC Kokoro**.
 0.98–1.02 bypass processing. Default pitch keeps the original audio.
 See [pitch listening checks](docs/PITCH_TESTING.md).
 
-Package ID: `com.labsii.voices`. Version: **0.6.28 (45)**.
+Package ID: `com.labsii.voices`. Version: **0.6.29 (46)**.
 
 Requires **Android 11 (API 30)** or newer, matching Speech Central, and an
 ARM64-capable Android system. This is a distribution baseline, not a guarantee
@@ -33,6 +33,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for fixes and validation limits.
 
 - Android system `TextToSpeechService` and voice-discovery endpoints
 - Automatic, resumable first-run Kokoro download with progress and retry
+- Confirmation before metered downloads, including a switch away from unmetered Wi-Fi
 - A persistent native `--serve-stream` process for warm synthesis
 - Framed 16-bit PCM delivery to any Android TTS client
 - Native Kokoro speech-rate control from Android synthesis requests (0.5x-2.0x)
@@ -46,7 +47,7 @@ included.
 
 ## Runtime download
 
-On first launch the app downloads about **171 MiB** from the public,
+On first launch the app downloads about **179 MB** from the public,
 revision-pinned `a8nova/adreno-llms-weights` repository:
 
 - Kokoro fp16 weights and metadata
@@ -54,6 +55,12 @@ revision-pinned `a8nova/adreno-llms-weights` repository:
 - the English eSpeak NG data pack
 
 Partial files remain in private app storage and resume on the next launch.
+On a metered connection, including most mobile-data connections, choose
+**Download** or **Not now**. Declining leaves the files untouched; reopen the
+app on an unmetered connection to continue, or use the Download button later.
+Downloads pause for approval if the connection becomes metered. Approval
+applies to the current download attempt, not all future downloads.
+
 Every downloaded file is checked against a SHA-256 digest pinned to the same
 repository revision before it is installed. A mismatching cached file is
 discarded and downloaded again. After validation, the app broadcasts that new
@@ -147,15 +154,20 @@ switching and cancellation on a device without a debugger.
 
 The current native target is arm64-v8a and requires a device OpenCL driver. The
 engine tries any accessible, working OpenCL FP16 device, with GPUs preferred.
-Vendor names are not a compatibility gate. Missing required capabilities are
-reported before downloads; an inconclusive probe may proceed to a real test.
-Before downloading model or voice data, the app runs the packaged runtime's
-lightweight OpenCL capability probe. A confirmed lack of required capabilities
-blocks downloads; a successful fp16 compile/dispatch/readback or an inconclusive
-probe permits installation. Adreno GPUs receive estimated experience ratings;
-other hardware is experimental and remains unrated. After installation it gets
-a short, silent synthesis test through the actual Android TTS service. A test
-failure can be retried and does not hide installed voices from other apps.
+Vendor names and preliminary capability checks do not block downloads. After
+installation, the app gathers OpenCL diagnostics and tries a short, silent
+synthesis through the actual Android TTS service, even if the probe failed.
+The test runs once per app installation/update or Android build change on all
+GPUs. Failure offers **Retry device test** and **Copy diagnostics**, retains
+the downloaded files, and does not hide installed voices from other apps.
+It does not imply that every OpenCL driver can run Kokoro successfully.
+
+The loader checks standard, Pixel, Mali and PowerVR library names, including
+Pixel wrapper initialization, and tries another library when a candidate lacks
+core functions or cannot enumerate platforms. Adreno GPUs receive estimated
+experience ratings; other hardware is experimental and remains unrated.
+The actual speech test verifies operation, not sustained performance. See
+[compatibility and installation checks](docs/COMPATIBILITY_TESTING.md).
 
 Existing downloads are retained on upgrade and hashed once to migrate to
 per-file verification receipts. Open the app once after updating to complete

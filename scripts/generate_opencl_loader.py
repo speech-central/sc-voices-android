@@ -26,43 +26,7 @@ print('''// Generated from Khronos OpenCL-Headers v2024.10.24 by generate_opencl
 #define CL_USE_DEPRECATED_OPENCL_2_1_APIS
 #define CL_USE_DEPRECATED_OPENCL_2_2_APIS
 #include <CL/cl.h>
-#include <dlfcn.h>
-#include <mutex>
-
-// A neutral SONAME (libkokoro_opencl.so) avoids vendor-specific DT_NEEDED.
-// The actual device driver is never shipped in the APK.
-static void* driver() {
-    static void* handle = nullptr;
-    static std::once_flag once;
-    std::call_once(once, [] {
-        const char* paths[] = {
-            "/vendor/lib64/libOpenCL.so", "/vendor/lib64/libOpenCL_adreno.so",
-            "/vendor/lib64/egl/libOpenCL.so", "/vendor/lib64/egl/libOpenCL_adreno.so",
-            "/odm/lib64/libOpenCL.so", "/odm/lib64/libOpenCL_adreno.so",
-            "/system/vendor/lib64/libOpenCL.so", "/system_ext/lib64/libOpenCL.so",
-            "/system/lib64/libOpenCL.so", "libOpenCL.so", "libOpenCL_adreno.so",
-            "/vendor/lib64/libGLES_mali.so", "/vendor/lib64/egl/libGLES_mali.so"
-        };
-        for (const char* path : paths) {
-            void* candidate = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
-            if (!candidate) continue;
-            auto platforms = reinterpret_cast<decltype(&clGetPlatformIDs)>(dlsym(candidate, "clGetPlatformIDs"));
-            // Do not invoke driver entrypoints inside call_once: some drivers
-            // re-enter other exported OpenCL functions during initialization.
-            if (platforms && platforms != &clGetPlatformIDs && dlsym(candidate, "clGetDeviceIDs")) {
-                handle = candidate;
-                break;
-            }
-            dlclose(candidate);
-        }
-    });
-    return handle;
-}
-
-static void* symbol(const char* name) {
-    void* handle = driver();
-    return handle ? dlsym(handle, name) : nullptr;
-}
+#include "opencl_loader_runtime.h"
 ''')
 for result, name, parameters in functions:
     result = re.sub(r"CL_API_PREFIX\w+\s*", "", result).strip()
@@ -85,7 +49,8 @@ for result, name, parameters in functions:
             plain = re.sub(r"\[[^]]*\]", "", param)
             arguments.append(re.search(r"(\w+)\s*$", plain).group(1))
     print(f'extern "C" {result} CL_API_CALL {name}({", ".join(params)}) {{')
-    print(f'    static auto fn = reinterpret_cast<decltype(&{name})>(symbol("{name}"));')
+    print(f'    static std::atomic<decltype(&{name})> cached{{nullptr}};')
+    print(f'    auto fn = kokoro_cl_loader::resolve("{name}", cached, &{name});')
     call = f'fn({", ".join(arguments)})'
     if result == "void":
         print(f'    if (fn) {call};')

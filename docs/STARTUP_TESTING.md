@@ -1,4 +1,4 @@
-# Startup and British-voice checks — 0.6.28 (45)
+# Startup and British-voice checks — 0.6.29 (46)
 
 This build fixes an identified startup timeout gap and adds diagnostics. The
 cause of the device-specific British-voice stall is not yet established.
@@ -8,7 +8,7 @@ cause of the device-specific British-voice stall is not yet established.
 1. Build and install the updated source. Open SC Kokoro once to refresh packaged
    runtime assets; verified model downloads can be reused.
 2. Use a debug build, preferably without attaching the debugger. Confirm the
-   native banner contains `build=0.6.28` and `protocol=3`.
+   native banner contains `build=0.6.29` and `protocol=3`.
 3. Send the same short sentence first to Heart (`af_heart`), then to Alice
    (`bf_alice`), with rate 1.0 and pitch 1.0. For example: "This is a short test."
 4. If neutral synthesis works, repeat Alice with pitch 1.12, then switch back

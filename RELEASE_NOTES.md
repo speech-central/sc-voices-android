@@ -1,3 +1,41 @@
+# 0.6.29 — OpenCL compatibility and installation
+
+- Synchronize the vendored Kokoro runtime through adreno-llms commit
+  `8129c946db14d33adee935aecf48fc6076c990fc` (2026-10-08), the upstream HEAD
+  checked for this release. Add PowerVR Rogue work sizing and avoid cached
+  decoder kernels that exceed local-memory or work-group limits. Retain our
+  existing unsupported-int8-kernel cache and all local inference safeguards.
+- Add Pixel OpenCL library discovery and wrapper initialization, plain Mali
+  and PowerVR library names, and matching optional Android manifest entries.
+  Reject unusable library candidates before committing to a provider. Keep
+  successful symbol lookups cached without a lock in the normal dispatch path.
+- Associate contexts explicitly with their platform. Report driver discovery,
+  context, queue and FP16 test errors with bounded diagnostics.
+- Install the model regardless of preliminary GPU-probe results, then attempt
+  actual speech through the shared Android TTS service on every GPU. Failed
+  tests offer retry and copyable diagnostics, preserve installed files, and
+  leave voices available to clients. No claim of Pixel or Mali compatibility
+  is made solely from a successful lightweight probe.
+- Ask before using a metered connection: Download or Not now. Pause for consent
+  if an unapproved download switches to a metered network. Keep partial files
+  for retry; show a specific offline message when no internet network exists.
+- Display download sizes and required free storage in decimal MB (1,000,000
+  bytes), with matching calculations. Update the README download estimate.
+
+This is source version **0.6.29 (46)**. Native model weights, pinned file hashes,
+low GPU priority, startup/inference watchdogs, cancellation, British voice
+selection and pitch processing are preserved. No CPU inference fallback,
+engine wake lock or foreground service is introduced.
+
+Validation: production Kotlin compilation against Android/AndroidX jars with
+generated-resource stand-ins, all 41 JVM tests, full host native compilation
+and linking, eight mock OpenCL loader scenarios and kernel resource-limit tests.
+The checks exercise library fallback, wrapper reentry, rejected-provider
+function-cache isolation, concurrent dispatch, metered consent and bounded
+probe output. Android APK/AAB packaging and physical-device synthesis could
+not be tested in this environment. See
+[device acceptance checks](docs/COMPATIBILITY_TESTING.md) before publishing.
+
 # 0.6.28 — Bound native startup and trace British voice initialization
 
 - Apply a 30-second startup deadline before setup begins, covering voice-file

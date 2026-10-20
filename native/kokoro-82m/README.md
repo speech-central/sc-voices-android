@@ -2,8 +2,15 @@
 
 This directory contains the Kokoro-82M C++/OpenCL runtime adapted from
 `a8nova/adreno-llms` revision
-`2f1aec494edf51536d130c0ba99c60676b0ff6fb` for the standalone Android system
+`8129c946db14d33adee935aecf48fc6076c990fc` for the standalone Android system
 TTS engine.
+
+The 2026-10-08 upstream change adds PowerVR Rogue tuning and local-memory
+checks before choosing cached decoder kernels. This integration also checks
+work-group limits. Our existing context-scoped cache and capability check for
+unsupported Qualcomm int8 kernels already cover the other upstream change;
+they are retained along with the local streaming, cancellation and memory
+management changes. Model files and their pinned hashes are unchanged.
 
 The app uses only the persistent `--serve-stream` mode:
 

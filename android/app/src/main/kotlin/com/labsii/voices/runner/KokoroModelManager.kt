@@ -7,6 +7,7 @@ package com.labsii.voices.runner
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.SystemClock
 import android.content.Intent
 import android.speech.tts.TextToSpeech
@@ -49,6 +50,8 @@ class KokoroModelManager private constructor(private val context: Context) {
             val progress: Int
                 get() = if (bytesTotal <= 0L) 0 else ((bytesDone * 100L) / bytesTotal).toInt()
         }
+        data object WaitingForNetwork : State
+        data class WaitingForMeteredApproval(val remainingBytes: Long) : State
         data object Ready : State
         data class Failed(val message: String) : State
     }
@@ -64,7 +67,7 @@ class KokoroModelManager private constructor(private val context: Context) {
 
     /** Starts or resumes installation. Repeated calls are single-flight. */
     @Synchronized
-    fun ensureInstalled() {
+    fun ensureInstalled(allowMetered: Boolean = false) {
         if (installJob?.isActive == true) return
         if (isReady(context)) {
             _state.value = State.Ready
@@ -77,10 +80,15 @@ class KokoroModelManager private constructor(private val context: Context) {
             try {
                 verifyPackagedRuntime()
                 extractBundledRuntimeFiles()
-                downloadMissingFiles()
+                downloadMissingFiles(allowMetered)
                 if (!isReady(context)) throw IOException("Kokoro installation did not pass validation")
                 _state.value = State.Ready
                 context.sendBroadcast(Intent(TextToSpeech.Engine.ACTION_TTS_DATA_INSTALLED))
+            } catch (pause: DownloadPaused) {
+                synchronized(this@KokoroModelManager) {
+                    installJob = null
+                    _state.value = pause.waitingState
+                }
             } catch (_: CancellationException) {
                 _state.value = State.NotInstalled
             } catch (t: Throwable) {
@@ -96,7 +104,28 @@ class KokoroModelManager private constructor(private val context: Context) {
         installJob?.start()
     }
 
-    fun retry() = ensureInstalled()
+    fun retry(allowMetered: Boolean = false) = ensureInstalled(allowMetered)
+
+    private class DownloadPaused(val waitingState: State) : IOException()
+
+    private fun checkDownloadConnection(allowMetered: Boolean, remainingBytes: Long) {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        val network = connectivity?.activeNetwork
+        val capabilities = network?.let { connectivity.getNetworkCapabilities(it) }
+        val connected = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        val decision = DownloadConnectionPolicy.decide(
+            connected = connected,
+            metered = connectivity?.isActiveNetworkMetered != false,
+            approved = allowMetered,
+        )
+        when (decision) {
+            DownloadConnectionPolicy.Decision.OFFLINE -> throw DownloadPaused(State.WaitingForNetwork)
+            DownloadConnectionPolicy.Decision.ASK -> throw DownloadPaused(
+                State.WaitingForMeteredApproval(remainingBytes.coerceAtLeast(0L)),
+            )
+            DownloadConnectionPolicy.Decision.DOWNLOAD -> Unit
+        }
+    }
 
     private fun downloadFailureMessage(error: Throwable): String {
         val causes = generateSequence(error) { it.cause }.take(10).toList()
@@ -156,14 +185,14 @@ class KokoroModelManager private constructor(private val context: Context) {
         VerifiedFile.atomicWrite(File(root, RUNTIME_MARKER), runtimeGeneration(context))
     }
 
-    private fun downloadMissingFiles() {
+    private fun downloadMissingFiles(allowMetered: Boolean) {
         root.mkdirs()
         var completed = DOWNLOADS.sumOf { spec ->
             File(root, spec.localPath).takeIf { it.isFile && it.length() == spec.sizeBytes }?.length() ?: 0L
         }
         val remaining = TOTAL_DOWNLOAD_BYTES - completed
         if (remaining > 0L && root.usableSpace in 1L until (remaining + MIN_FREE_SPACE_BYTES)) {
-            throw IOException("Not enough storage for Kokoro (need about ${mib(remaining + MIN_FREE_SPACE_BYTES)} MiB free)")
+            throw IOException("Not enough storage for Kokoro (need about ${megabytesRoundedUp(remaining + MIN_FREE_SPACE_BYTES)} MB free)")
         }
 
         for (spec in DOWNLOADS) {
@@ -183,11 +212,11 @@ class KokoroModelManager private constructor(private val context: Context) {
                 ensureFreeSpace(spec.sizeBytes)
             }
             if (destination.exists()) destination.delete()
-            completed = downloadOne(spec, completed)
+            completed = downloadOne(spec, completed, allowMetered)
         }
     }
 
-    private fun downloadOne(spec: DownloadSpec, completedBefore: Long): Long {
+    private fun downloadOne(spec: DownloadSpec, completedBefore: Long, allowMetered: Boolean): Long {
         val destination = File(root, spec.localPath)
         destination.parentFile?.mkdirs()
         val partial = File(destination.parentFile, destination.name + ".part")
@@ -201,6 +230,7 @@ class KokoroModelManager private constructor(private val context: Context) {
         }
 
         var existing = partial.length()
+        checkDownloadConnection(allowMetered, TOTAL_DOWNLOAD_BYTES - completedBefore - existing)
         val connection = (URL("$HF_BASE/${spec.remotePath}").openConnection() as HttpURLConnection).apply {
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS
@@ -223,11 +253,17 @@ class KokoroModelManager private constructor(private val context: Context) {
 
             var fileBytes = existing
             var lastReported = fileBytes
+            var lastNetworkCheck = SystemClock.elapsedRealtime()
             _state.value = State.Downloading(spec.label, completedBefore + fileBytes, TOTAL_DOWNLOAD_BYTES)
             connection.inputStream.use { input ->
                 FileOutputStream(partial, append).use { output ->
                     val buffer = ByteArray(BUFFER_BYTES)
                     while (true) {
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastNetworkCheck >= 500L) {
+                            checkDownloadConnection(allowMetered, TOTAL_DOWNLOAD_BYTES - completedBefore - fileBytes)
+                            lastNetworkCheck = now
+                        }
                         val count = input.read(buffer)
                         if (count < 0) break
                         if (count == 0) continue
@@ -275,7 +311,7 @@ class KokoroModelManager private constructor(private val context: Context) {
         if (root.usableSpace in 1L until (bytesNeeded + MIN_FREE_SPACE_BYTES)) {
             throw IOException(
                 "Not enough storage to replace a corrupt Kokoro file " +
-                    "(need about ${mib(bytesNeeded + MIN_FREE_SPACE_BYTES)} MiB free)",
+                    "(need about ${megabytesRoundedUp(bytesNeeded + MIN_FREE_SPACE_BYTES)} MB free)",
             )
         }
     }
@@ -300,7 +336,7 @@ class KokoroModelManager private constructor(private val context: Context) {
         private const val ASSET_ROOT = "kokoro"
         private const val VOICE_DIRECTORY = "assets/voices/"
         private const val RUNTIME_MARKER = ".bundled_runtime_v1"
-        private const val RUNTIME_VERSION = "0.6.11-protocol2"
+        private const val RUNTIME_VERSION = "0.6.29-protocol3"
         private const val BUFFER_BYTES = 256 * 1024
         private const val PROGRESS_STEP_BYTES = 1024 * 1024
         private const val MIN_FREE_SPACE_BYTES = 32L * 1024L * 1024L
@@ -394,6 +430,7 @@ class KokoroModelManager private constructor(private val context: Context) {
             }.getOrDefault(false)
         }
 
-        private fun mib(bytes: Long): Long = (bytes + 1024L * 1024L - 1L) / (1024L * 1024L)
+        private fun megabytesRoundedUp(bytes: Long): Long =
+            bytes / 1_000_000L + if (bytes % 1_000_000L == 0L) 0L else 1L
     }
 }
