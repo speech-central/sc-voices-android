@@ -53,6 +53,13 @@ static void enable_opencl() {
 extern "C" void* __wrap_dlopen(const char* path, int) {
     const std::string p(path);
     if (scenario == "generic" && p == "libOpenCL.so") return &good_driver;
+    if (scenario == "android16_system") {
+        if (p == "libOpenCL.so") return &bad_driver;
+        if (p == "libOpenCL_system.so") {
+            fallback_tried = true;
+            return &good_driver;
+        }
+    }
     if (scenario == "pixel_direct" && p == "libOpenCL-pixel.so") return &good_driver;
     if (scenario == "pixel_wrapper" && p == "libOpenCL-pixel.so") return &wrapper_driver;
     if (scenario == "mali_soname" && p == "libGLES_mali.so") return &good_driver;
@@ -102,6 +109,7 @@ int main(int argc, char** argv) {
         });
         for (auto& t : threads) t.join();
         if (scenario == "pixel_wrapper") assert(enabled && reentrant_calls == 1);
+        if (scenario == "android16_system") assert(fallback_tried && reentrant_calls == 1);
         if (scenario == "fallback") assert(fallback_tried && reentrant_calls == 1);
         if (scenario == "missing_symbol") assert(fallback_tried);
     }

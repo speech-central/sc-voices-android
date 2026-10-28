@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.LabsiiVoices" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="colorPrimary">@color/sc_primary</item>
+        <item name="colorOnPrimary">@color/sc_on_primary</item>
+        <item name="colorPrimaryContainer">@color/sc_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/sc_on_primary_container</item>
+        <item name="colorSecondary">@color/sc_secondary</item>
+        <item name="colorOnSecondary">@color/sc_on_secondary</item>
+        <item name="colorSecondaryContainer">@color/sc_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/sc_on_secondary_container</item>
+        <item name="colorTertiary">@color/sc_tertiary</item>
+        <item name="colorOnTertiary">@color/sc_on_tertiary</item>
+        <item name="colorTertiaryContainer">@color/sc_tertiary_container</item>
+        <item name="colorOnTertiaryContainer">@color/sc_on_tertiary_container</item>
+        <item name="colorError">@color/sc_error</item>
+        <item name="colorOnError">@color/sc_on_error</item>
+        <item name="colorErrorContainer">@color/sc_error_container</item>
+        <item name="colorOnErrorContainer">@color/sc_on_error_container</item>
+        <item name="android:colorBackground">@color/sc_background</item>
+        <item name="colorOnBackground">@color/sc_on_background</item>
+        <item name="colorSurface">@color/sc_surface</item>
+        <item name="colorOnSurface">@color/sc_on_surface</item>
+        <item name="colorSurfaceVariant">@color/sc_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/sc_on_surface_variant</item>
+        <item name="colorOutline">@color/sc_outline</item>
+        <item name="colorOutlineVariant">@color/sc_outline_variant</item>
+        <item name="colorSurfaceInverse">@color/sc_inverse_surface</item>
+        <item name="colorOnSurfaceInverse">@color/sc_inverse_on_surface</item>
+        <item name="colorPrimaryInverse">@color/sc_inverse_primary</item>
+        <item name="colorSurfaceDim">@color/sc_surface_dim</item>
+        <item name="colorSurfaceBright">@color/sc_surface_bright</item>
+        <item name="colorSurfaceContainerLowest">@color/sc_surface_container_lowest</item>
+        <item name="colorSurfaceContainerLow">@color/sc_surface_container_low</item>
+        <item name="colorSurfaceContainer">@color/sc_surface_container</item>
+        <item name="colorSurfaceContainerHigh">@color/sc_surface_container_high</item>
+        <item name="colorSurfaceContainerHighest">@color/sc_surface_container_highest</item>
+        <item name="android:windowBackground">@color/sc_background</item>
+        <item name="android:textColorPrimary">@color/sc_on_surface</item>
+        <item name="android:textColorSecondary">@color/sc_on_surface_variant</item>
+        <item name="android:colorAccent">@color/sc_primary</item>
+    </style>
+
+    <!-- Optional overlay for high-contrast selection; follows day/night automatically. -->
+    <style name="ThemeOverlay.LabsiiVoices.HighContrast" parent="">
+        <item name="colorPrimary">@color/sc_primary_high_contrast</item>
+        <item name="colorOnPrimary">@color/sc_on_primary_high_contrast</item>
+        <item name="colorPrimaryContainer">@color/sc_primary_container_high_contrast</item>
+        <item name="colorOnPrimaryContainer">@color/sc_on_primary_container_high_contrast</item>
+        <item name="colorSecondary">@color/sc_secondary_high_contrast</item>
+        <item name="colorOnSecondary">@color/sc_on_secondary_high_contrast</item>
+        <item name="colorSecondaryContainer">@color/sc_secondary_container_high_contrast</item>
+        <item name="colorOnSecondaryContainer">@color/sc_on_secondary_container_high_contrast</item>
+        <item name="colorTertiary">@color/sc_tertiary_high_contrast</item>
+        <item name="colorOnTertiary">@color/sc_on_tertiary_high_contrast</item>
+        <item name="colorTertiaryContainer">@color/sc_tertiary_container_high_contrast</item>
+        <item name="colorOnTertiaryContainer">@color/sc_on_tertiary_container_high_contrast</item>
+        <item name="colorError">@color/sc_error_high_contrast</item>
+        <item name="colorOnError">@color/sc_on_error_high_contrast</item>
+        <item name="colorErrorContainer">@color/sc_error_container_high_contrast</item>
+        <item name="colorOnErrorContainer">@color/sc_on_error_container_high_contrast</item>
+        <item name="android:colorBackground">@color/sc_background_high_contrast</item>
+        <item name="colorOnBackground">@color/sc_on_background_high_contrast</item>
+        <item name="colorSurface">@color/sc_surface_high_contrast</item>
+        <item name="colorOnSurface">@color/sc_on_surface_high_contrast</item>
+        <item name="colorSurfaceVariant">@color/sc_surface_variant_high_contrast</item>
+        <item name="colorOnSurfaceVariant">@color/sc_on_surface_variant_high_contrast</item>
+        <item name="colorOutline">@color/sc_outline_high_contrast</item>
+        <item name="colorOutlineVariant">@color/sc_outline_variant_high_contrast</item>
+        <item name="colorSurfaceInverse">@color/sc_inverse_surface_high_contrast</item>
+        <item name="colorOnSurfaceInverse">@color/sc_inverse_on_surface_high_contrast</item>
+        <item name="colorPrimaryInverse">@color/sc_inverse_primary_high_contrast</item>
+        <item name="colorSurfaceDim">@color/sc_surface_dim_high_contrast</item>
+        <item name="colorSurfaceBright">@color/sc_surface_bright_high_contrast</item>
+        <item name="colorSurfaceContainerLowest">@color/sc_surface_container_lowest_high_contrast</item>
+        <item name="colorSurfaceContainerLow">@color/sc_surface_container_low_high_contrast</item>
+        <item name="colorSurfaceContainer">@color/sc_surface_container_high_contrast</item>
+        <item name="colorSurfaceContainerHigh">@color/sc_surface_container_high_high_contrast</item>
+        <item name="colorSurfaceContainerHighest">@color/sc_surface_container_highest_high_contrast</item>
+        <item name="android:windowBackground">@color/sc_background_high_contrast</item>
+        <item name="android:textColorPrimary">@color/sc_on_surface_high_contrast</item>
+        <item name="android:textColorSecondary">@color/sc_on_surface_variant_high_contrast</item>
+        <item name="android:colorAccent">@color/sc_primary_high_contrast</item>
+    </style>
+</resources>

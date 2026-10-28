@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="background_reading_title">Uninterrupted background reading</string>
+    <string name="background_reading_explanation">Some devices may require a battery optimization exemption for SC Kokoro to work uninterrupted in the background. This setting is optional and may increase battery use.</string>
+    <string name="background_reading_edit">Edit</string>
+    <string name="background_reading_enabled">Battery optimization exemption: Enabled</string>
+    <string name="background_reading_disabled">Battery optimization exemption: Not enabled</string>
+    <string name="background_reading_unknown">Battery optimization exemption: Status unavailable</string>
+    <string name="background_reading_manual">Select SC Kokoro in Settings and disable battery optimization. If needed, show all apps. Return here to check the status.</string>
+    <string name="background_reading_unavailable">Unable to open battery settings. You can check them manually in your device settings.</string>
+</resources>

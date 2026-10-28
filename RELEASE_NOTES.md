@@ -1,3 +1,51 @@
+# 0.6.31 — Persistent engine default voice
+
+- Add a dedicated Material voice-settings activity, advertised through the
+  Android TTS engine metadata and linked from SC Kokoro's ready screen. Group
+  all installed voices into US and UK English sections.
+- Persist the engine default with Preferences DataStore. Migrate the existing
+  onboarding completion, tested renderer and tested generation values from the
+  legacy `onboarding` SharedPreferences file.
+- Return the saved voice from `onGetDefaultVoiceNameFor()` for supported
+  English locales and use it when a synthesis request does not contain a valid
+  explicit voice. Valid client-selected voices continue to take priority.
+- Cache the selected ID inside the running TTS service and update it from the
+  DataStore flow so synchronous Android voice callbacks do not perform storage
+  reads. A one-time service startup read establishes the correct value after a
+  process restart.
+
+This is source version **0.6.31 (48)**. The Android 16 OpenCL fallback and the
+optional alternative-engine recommendation from 0.6.30 are retained.
+
+Validation: the changed production Kotlin sources compile against Android and
+AndroidX API stand-ins; all 41 existing JVM tests pass in isolated test-class
+runs and the three new default-voice policy tests pass. The nine mock OpenCL
+loader scenarios and device-limit checks pass. A complete Gradle build and
+physical Android voice-picker test remain required in Android Studio because
+this environment cannot download the Gradle 9.8 distribution or DataStore AAR.
+
+# 0.6.30 — Android 16 system OpenCL fallback
+
+- Try Android 16's direct `libOpenCL_system.so` provider, including system and
+  system-ext paths, when the generic OpenCL ICD loads but reports no platforms.
+  Declare that provider as an optional native library in the Android manifest.
+- Add a regression scenario in which `libOpenCL.so` returns
+  `CL_PLATFORM_NOT_FOUND_KHR` and `libOpenCL_system.so` provides the working
+  platform, while retaining candidate validation and thread-safe dispatch.
+- After the actual Kokoro speech test fails, retain retry and diagnostics and
+  offer an optional Google Play link to ToBe SAID as a less demanding offline
+  TTS alternative. Download and network failures do not show that suggestion.
+
+This is source version **0.6.30 (47)**. Existing models, voices, hashes,
+protocol 3, pitch processing, watchdogs, cancellation, and all 0.6.29 OpenCL
+routes are preserved. The host checks validate fallback behavior; final support
+still requires synthesis testing on each vendor/Android driver combination.
+
+Validation: production Kotlin compilation against Android/AndroidX jars, all
+41 JVM tests, full host native compilation and linking, nine mock OpenCL loader
+scenarios, and kernel resource-limit tests. APK/AAB packaging and physical
+Galaxy S24 synthesis could not be performed in this environment.
+
 # 0.6.29 — OpenCL compatibility and installation
 
 - Synchronize the vendored Kokoro runtime through adreno-llms commit

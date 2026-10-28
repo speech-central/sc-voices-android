@@ -32,14 +32,15 @@ static Driver& driver() {
     static std::once_flag once;
     std::call_once(once, [] {
         const char* paths[] = {
-            "libOpenCL.so", "libOpenCL-pixel.so", "libOpenCL_adreno.so",
+            "libOpenCL.so", "libOpenCL_system.so", "libOpenCL-pixel.so", "libOpenCL_adreno.so",
             "libGLES_mali.so", "libmali.so", "libPVROCL.so",
             "/vendor/lib64/libOpenCL.so", "/vendor/lib64/libOpenCL-pixel.so",
             "/vendor/lib64/libOpenCL_adreno.so",
             "/vendor/lib64/egl/libOpenCL.so", "/vendor/lib64/egl/libOpenCL_adreno.so",
             "/odm/lib64/libOpenCL.so", "/odm/lib64/libOpenCL-pixel.so",
             "/odm/lib64/libOpenCL_adreno.so", "/system/vendor/lib64/libOpenCL.so",
-            "/system_ext/lib64/libOpenCL.so", "/system/lib64/libOpenCL.so",
+            "/system_ext/lib64/libOpenCL.so", "/system_ext/lib64/libOpenCL_system.so",
+            "/system/lib64/libOpenCL.so", "/system/lib64/libOpenCL_system.so",
             "/vendor/lib64/libGLES_mali.so", "/vendor/lib64/egl/libGLES_mali.so",
             "/system/vendor/lib64/egl/libGLES_mali.so", "/system/lib64/egl/libGLES_mali.so",
             "/vendor/lib64/libPVROCL.so", "/system/vendor/lib64/libPVROCL.so",

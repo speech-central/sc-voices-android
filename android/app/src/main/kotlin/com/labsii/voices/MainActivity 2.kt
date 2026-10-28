@@ -1,0 +1,594 @@
+/*
+ * Adreno System TTS integration.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * See NOTICE for upstream copyright and attribution information.
+ */
+package com.labsii.voices
+
+import android.app.Activity
+import android.app.Dialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.os.Build
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
+import android.view.Gravity
+import android.view.View
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.labsii.voices.runner.KokoroDeviceProbe
+import com.labsii.voices.runner.KokoroModelManager
+import com.labsii.voices.runner.KokoroSelfTest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+import java.util.Locale
+import androidx.core.content.edit
+
+/** First-run Kokoro installer and entry point to the installed system TTS engine. */
+class MainActivity : Activity() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private lateinit var manager: KokoroModelManager
+
+    private lateinit var downloadScreen: LinearLayout
+    private lateinit var experienceScreen: LinearLayout
+    private lateinit var readyScreen: LinearLayout
+    private lateinit var downloadTitleView: TextView
+    private lateinit var downloadDescriptionView: TextView
+    private lateinit var statusView: TextView
+    private lateinit var progressPercentView: TextView
+    private lateinit var progressBar: LinearProgressIndicator
+    private lateinit var retryButton: MaterialButton
+    private lateinit var experienceTitleView: TextView
+    private lateinit var experienceRows: LinearLayout
+    private lateinit var experienceDetailView: TextView
+
+    private var detectedRenderer: String? = null
+    private val preferences by lazy { getSharedPreferences("onboarding", MODE_PRIVATE) }
+    private var onboardingComplete = false
+    private var selfTestPassed = false
+    private var testingDevice = false
+    private var meteredPromptShown = false
+    private var meteredDialog: Dialog? = null
+    private lateinit var diagnosticsButton: MaterialButton
+    private lateinit var alternativeEngineCard: MaterialCardView
+    private var diagnosticText = ""
+    private val backgroundReadingCards = mutableListOf<Pair<TextView, MaterialButton>>()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        onboardingComplete = preferences.getBoolean("complete", false)
+        manager = KokoroModelManager.get(applicationContext)
+        setContentView(buildUi())
+        statusView.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        detectedRenderer = preferences.getString("tested_renderer", null)
+        selfTestPassed = preferences.getString("tested_generation", null) == testGeneration()
+        scope.launch { manager.state.collect { renderState(it) } }
+        manager.ensureInstalled()
+    }
+
+    override fun onPostResume() {
+        super.onPostResume()
+        refreshBackgroundReading()
+    }
+
+    override fun onDestroy() {
+        meteredDialog?.dismiss()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    private fun buildUi(): View {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(28), dp(20), dp(24))
+        }
+
+        content.addView(TextView(this).apply {
+            text = getString(R.string.product_name)
+            textSize = 32f
+            setTypeface(typeface, Typeface.BOLD)
+        })
+        content.addView(TextView(this).apply {
+            text = "Private, on-device text-to-speech powered by Kokoro and OpenCL."
+            textSize = 16f
+            setPadding(0, dp(8), 0, dp(24))
+        })
+
+        downloadScreen = buildDownloadScreen()
+        experienceScreen = buildExperienceScreen()
+        readyScreen = buildReadyScreen()
+        content.addView(downloadScreen, matchParams())
+        content.addView(experienceScreen, matchParams())
+        content.addView(readyScreen, matchParams())
+        showScreen(downloadScreen)
+
+        return ScrollView(this).apply {
+            isFillViewport = true
+            addView(content)
+        }
+    }
+
+    private fun buildDownloadScreen(): LinearLayout = screen().apply {
+        addView(card(matchParams()) { cardContent ->
+            downloadTitleView = sectionTitle("Download Kokoro")
+            cardContent.addView(downloadTitleView)
+            downloadDescriptionView = bodyText(
+                "Kokoro must be downloaded from the internet once before it can speak. " +
+                    "The model stays in this app's private storage and all synthesis remains on device.",
+            )
+            cardContent.addView(downloadDescriptionView)
+            progressBar = LinearProgressIndicator(this@MainActivity).apply {
+                max = 100
+                progress = 0
+                isIndeterminate = true
+            }
+            cardContent.addView(progressBar, matchParams(top = 20))
+            val progressTextRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.TOP
+                setPadding(0, dp(14), 0, 0)
+            }
+            statusView = bodyText("Checking installed files…").apply {
+                setPadding(0, 0, dp(12), 0)
+            }
+            progressTextRow.addView(statusView, weightedParams())
+            progressPercentView = bodyText("").apply {
+                setPadding(0, 0, 0, 0)
+                gravity = Gravity.END
+                maxLines = 1
+                setTypeface(typeface, Typeface.BOLD)
+            }
+            progressTextRow.addView(
+                progressPercentView,
+                LinearLayout.LayoutParams(dp(56), LinearLayout.LayoutParams.WRAP_CONTENT),
+            )
+            cardContent.addView(progressTextRow, matchParams())
+            retryButton = outlinedButton("Retry download").apply {
+                visibility = View.GONE
+                setOnClickListener { manager.retry() }
+            }
+            cardContent.addView(retryButton, matchParams(top = 20))
+            diagnosticsButton = outlinedButton("Copy diagnostics").apply {
+                visibility = View.GONE
+                setOnClickListener {
+                    getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                        ClipData.newPlainText("SC Kokoro device test", diagnosticText),
+                    )
+                    Toast.makeText(this@MainActivity, "Diagnostics copied", Toast.LENGTH_SHORT).show()
+                }
+            }
+            cardContent.addView(diagnosticsButton, matchParams(top = 12))
+        })
+        alternativeEngineCard = card { cardContent ->
+            cardContent.addView(sectionTitle("Try another voice engine"))
+            cardContent.addView(bodyText(
+                "If Kokoro cannot generate speech reliably on this device, a less demanding " +
+                    "voice engine may work better. You can try ToBe SAID, another offline " +
+                    "Android text-to-speech engine. Performance and voice quality vary by device.",
+            ))
+            cardContent.addView(primaryButton("View ToBe SAID on Google Play").apply {
+                setOnClickListener { openAlternativeEngine() }
+            }, matchParams(top = 20))
+        }.apply { visibility = View.GONE }
+        addView(alternativeEngineCard, matchParams(top = 16))
+    }
+
+    private fun buildExperienceScreen(): LinearLayout = screen().apply {
+        addView(card(matchParams()) { cardContent ->
+            experienceTitleView = sectionTitle("Checking this device's expected experience…")
+            cardContent.addView(experienceTitleView)
+            cardContent.addView(ratingHeader(), matchParams(top = 16))
+            experienceRows = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+            cardContent.addView(experienceRows, matchParams())
+            experienceDetailView = bodyText("").apply { visibility = View.GONE }
+            cardContent.addView(experienceDetailView, matchParams(top = 12))
+        })
+
+        addView(backgroundReadingCard(), matchParams(top = 16))
+        addView(speechCentralCard(), matchParams(top = 16))
+        addView(primaryButton("Continue").apply {
+            setOnClickListener {
+                onboardingComplete = true
+                preferences.edit { putBoolean("complete", true) }
+                showScreen(readyScreen)
+            }
+        }, matchParams(top = 24))
+    }
+
+    private fun buildReadyScreen(): LinearLayout = screen().apply {
+        addView(card(matchParams()) { cardContent ->
+            cardContent.addView(sectionTitle("Kokoro is ready"))
+            cardContent.addView(bodyText(
+                "All 28 English voices are installed. SC Kokoro is ready to use as an Android text-to-speech engine.",
+            ))
+        })
+        addView(backgroundReadingCard(), matchParams(top = 16))
+        addView(speechCentralCard(), matchParams(top = 16))
+        addView(outlinedButton("Credits and licenses").apply {
+            setOnClickListener { startActivity(Intent(this@MainActivity, CreditsActivity::class.java)) }
+        }, matchParams(top = 24))
+    }
+
+    private fun speechCentralCard(): MaterialCardView = card { cardContent ->
+        cardContent.addView(sectionTitle("A better reading experience"))
+        cardContent.addView(bodyText(
+            "For the best reading experience, we recommend Speech Central. Apps with less advanced buffering may significantly downgrade your experience.",
+        ))
+        cardContent.addView(primaryButton("Get Speech Central").apply {
+            setOnClickListener { openSpeechCentral() }
+        }, matchParams(top = 20))
+    }
+
+    private fun backgroundReadingCard(): MaterialCardView = card { content ->
+        content.addView(sectionTitle(getString(R.string.background_reading_title)))
+        content.addView(bodyText(getString(R.string.background_reading_explanation)))
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val status = bodyText("").apply {
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, 0, dp(12), 0)
+        }
+        val button = primaryButton(getString(R.string.background_reading_edit)).apply {
+            setOnClickListener { openBackgroundReadingSettings() }
+        }
+        row.addView(status, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(button, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        content.addView(row, matchParams(top = 12))
+        backgroundReadingCards.add(status to button)
+    }
+
+    private fun batteryExempt(): Boolean? = runCatching {
+        getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(packageName)
+    }.getOrNull()
+
+    private fun refreshBackgroundReading() {
+        val exempt = batteryExempt()
+        for ((status, _) in backgroundReadingCards) {
+            status.setText(when (exempt) {
+                true -> R.string.background_reading_enabled
+                false -> R.string.background_reading_disabled
+                null -> R.string.background_reading_unknown
+            })
+        }
+    }
+
+    private fun openBackgroundReadingSettings() {
+        // No direct exemption request or automatic navigation. The user chooses
+        // the app in Settings; refresh on return checks the actual OS state.
+        val intents = listOf(
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")),
+        )
+        for (intent in intents) {
+            try {
+                startActivity(intent)
+                Toast.makeText(this, R.string.background_reading_manual, Toast.LENGTH_LONG).show()
+                return
+            } catch (_: ActivityNotFoundException) {
+                // Fall back to app details when the battery list is unavailable.
+            } catch (_: SecurityException) {
+                // Managed devices may block a settings screen.
+            }
+        }
+        Toast.makeText(this, R.string.background_reading_unavailable, Toast.LENGTH_LONG).show()
+    }
+
+    private fun renderDeviceExperience(renderer: String?) {
+        val profile = when {
+            renderer?.contains("Adreno", ignoreCase = true) == true && renderer.contains("619") ->
+                DeviceExperience("Expected experience for $renderer", listOf(
+                    Rating("Linear reading", 6.5),
+                    Rating("Non-linear reading", 4.5),
+                    Rating("Instant accessibility feedback", 1.5),
+                ))
+            renderer?.contains("Adreno", ignoreCase = true) == true && renderer.contains("620") ->
+                DeviceExperience("Expected experience for $renderer", listOf(
+                    Rating("Linear reading", 9.0),
+                    Rating("Non-linear reading", 6.5),
+                    Rating("Instant accessibility feedback", 2.5),
+                ))
+            renderer != null && listOf(" 730", " 740", " 750", " 830").any(renderer::contains) ->
+                DeviceExperience("Expected experience for $renderer", listOf(
+                    Rating("Linear reading", 10.0),
+                    Rating("Non-linear reading", 7.5),
+                    Rating("Instant accessibility feedback", 3.5),
+                ), "10/10 for linear reading requires verified synthesis at 3× real time or faster.")
+            renderer != null -> DeviceExperience(
+                "Expected experience for $renderer",
+                emptyList(),
+                "This device has not yet been rated.",
+            )
+            else -> DeviceExperience(
+                "Expected experience unavailable",
+                emptyList(),
+                "The OpenCL runtime must be ready before this device can be rated.",
+            )
+        }
+
+        experienceTitleView.text = profile.title
+        experienceRows.removeAllViews()
+        profile.ratings.forEach { experienceRows.addView(ratingRow(it), matchParams(top = 12)) }
+        experienceDetailView.text = profile.detail
+        experienceDetailView.visibility = if (profile.detail.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    private fun ratingHeader(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        addView(TextView(this@MainActivity).apply {
+            text = "USE CASE"
+            textSize = 12f
+            setTypeface(typeface, Typeface.BOLD)
+        }, weightedParams())
+        addView(TextView(this@MainActivity).apply {
+            text = "RATING"
+            textSize = 12f
+            gravity = Gravity.START
+            setTypeface(typeface, Typeface.BOLD)
+        }, weightedParams())
+    }
+
+    private fun ratingRow(rating: Rating): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(TextView(this@MainActivity).apply {
+            text = rating.label
+            textSize = 15f
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, dp(12), 0)
+        }, weightedParams())
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = "${rating.value.toDisplay()}/10"
+                textSize = 16f
+                setTypeface(typeface, Typeface.BOLD)
+            })
+            addView(LinearProgressIndicator(this@MainActivity).apply {
+                max = 100
+                progress = (rating.value * 10).toInt()
+            }, matchParams(top = 6))
+        }, weightedParams())
+    }
+
+    private suspend fun renderState(state: KokoroModelManager.State) {
+        if (state !is KokoroModelManager.State.WaitingForMeteredApproval) {
+            meteredDialog?.dismiss()
+            meteredDialog = null
+        }
+        diagnosticsButton.visibility = View.GONE
+        alternativeEngineCard.visibility = View.GONE
+        when (state) {
+            KokoroModelManager.State.NotInstalled, KokoroModelManager.State.Preparing -> {
+                meteredPromptShown = false
+                showScreen(downloadScreen)
+                downloadTitleView.text = "Download Kokoro"
+                progressBar.visibility = View.VISIBLE
+                progressBar.isIndeterminate = true
+                retryButton.visibility = View.GONE
+                statusView.text = "Checking files and preparing download…"
+                progressPercentView.text = ""
+            }
+            is KokoroModelManager.State.Downloading -> {
+                showScreen(downloadScreen)
+                downloadTitleView.text = "Download Kokoro"
+                progressBar.visibility = View.VISIBLE
+                progressBar.isIndeterminate = false
+                progressBar.progress = state.progress
+                retryButton.visibility = View.GONE
+                statusView.text = "${state.currentFile}\n" +
+                    "${formatBytes(state.bytesDone)} of ${formatBytes(state.bytesTotal)}"
+                progressPercentView.text = "${state.progress}%"
+            }
+            KokoroModelManager.State.WaitingForNetwork -> {
+                showDownloadAction(
+                    "Internet connection needed",
+                    "Connect to Wi-Fi or mobile data to download the model and voices. Saved download progress will be reused.",
+                    "Retry download",
+                ) { manager.retry() }
+            }
+            is KokoroModelManager.State.WaitingForMeteredApproval -> {
+                showDownloadAction(
+                    "Download when you're ready",
+                    "This connection is metered. Up to ${formatBytes(state.remainingBytes)} remains to download. You can download now or return on Wi-Fi; saved progress will be reused.",
+                    "Download",
+                ) { confirmMeteredDownload(state.remainingBytes) }
+                if (!meteredPromptShown) confirmMeteredDownload(state.remainingBytes)
+            }
+            KokoroModelManager.State.Ready -> {
+                if (!selfTestPassed) {
+                    if (testingDevice) return
+                    testingDevice = true
+                    showScreen(downloadScreen)
+                    downloadTitleView.text = "Testing this device"
+                    downloadDescriptionView.text = "The voice files are installed. We will now check whether this device can generate speech."
+                    statusView.text = "Running a short, silent synthesis test. The first run may take a little longer."
+                    progressPercentView.text = ""
+                    progressBar.visibility = View.VISIBLE
+                    progressBar.isIndeterminate = true
+                    retryButton.visibility = View.GONE
+                    var probe: KokoroDeviceProbe.Result? = null
+                    try {
+                        probe = KokoroDeviceProbe.probe(applicationContext)
+                        detectedRenderer = probe.renderer
+                        // A lightweight probe failure must not prevent a real attempt.
+                        KokoroSelfTest.run(applicationContext)
+                        selfTestPassed = true
+                        preferences.edit {
+                            putString("tested_generation", testGeneration())
+                            putString("tested_renderer", detectedRenderer)
+                        }
+                    } catch (failure: Exception) {
+                        if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
+                        diagnosticText = listOfNotNull(
+                            "SC Kokoro ${BuildConfig.VERSION_NAME}",
+                            "Device: ${Build.MANUFACTURER} ${Build.MODEL}; Android ${Build.VERSION.RELEASE}",
+                            "Build: ${Build.FINGERPRINT}",
+                            "Renderer: ${probe?.renderer ?: "not detected"}",
+                            "Synthesis: ${failure.message ?: failure.javaClass.simpleName}",
+                            probe?.reason,
+                            probe?.diagnostics,
+                        ).joinToString("\n")
+                        showDownloadAction(
+                            "Speech test did not complete",
+                            "Models are installed, but speech could not be verified. " +
+                                (probe?.reason ?: failure.message ?: "The engine did not complete the test.") +
+                                " You can retry without downloading again. Installed voices remain available to other apps.",
+                            "Retry device test",
+                        ) { scope.launch { renderState(KokoroModelManager.State.Ready) } }
+                        diagnosticsButton.visibility = View.VISIBLE
+                        alternativeEngineCard.visibility = View.VISIBLE
+                        return
+                    } finally {
+                        testingDevice = false
+                    }
+                }
+                showScreen(if (onboardingComplete) readyScreen else experienceScreen)
+                renderDeviceExperience(detectedRenderer)
+            }
+            is KokoroModelManager.State.Failed -> {
+                showDownloadAction("Download could not complete", state.message, "Retry download") { manager.retry() }
+            }
+        }
+    }
+
+    private fun showDownloadAction(title: String, message: String, action: String, onClick: () -> Unit) {
+        showScreen(downloadScreen)
+        downloadTitleView.text = title
+        progressBar.isIndeterminate = false
+        progressBar.visibility = View.GONE
+        progressPercentView.text = ""
+        statusView.text = message
+        retryButton.text = action
+        retryButton.visibility = View.VISIBLE
+        retryButton.setOnClickListener { onClick() }
+    }
+
+    private fun confirmMeteredDownload(remainingBytes: Long) {
+        if (meteredDialog?.isShowing == true || isFinishing || isDestroyed) return
+        meteredPromptShown = true
+        meteredDialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Download using this connection?")
+            .setMessage(
+                "Voice files need up to ${formatBytes(remainingBytes)} more. " +
+                    "This connection is metered, so mobile data or other charges may apply.",
+            )
+            .setPositiveButton("Download") { _, _ -> manager.retry(allowMetered = true) }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    private fun showScreen(screen: View) {
+        downloadScreen.visibility = if (screen === downloadScreen) View.VISIBLE else View.GONE
+        experienceScreen.visibility = if (screen === experienceScreen) View.VISIBLE else View.GONE
+        readyScreen.visibility = if (screen === readyScreen) View.VISIBLE else View.GONE
+        refreshBackgroundReading()
+    }
+
+    private fun testGeneration(): String =
+        "${BuildConfig.VERSION_NAME}:${packageManager.getPackageInfo(packageName, 0).lastUpdateTime}:${Build.FINGERPRINT}"
+
+    private fun openSpeechCentral() {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SPEECH_CENTRAL_URL)))
+    }
+
+    private fun openAlternativeEngine() {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(ALTERNATIVE_ENGINE_URL)))
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "No app can open the Google Play link", Toast.LENGTH_LONG).show()
+        } catch (_: SecurityException) {
+            Toast.makeText(this, "Google Play link is unavailable on this device", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun screen(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+    }
+
+    private fun card(
+        params: LinearLayout.LayoutParams? = null,
+        content: (LinearLayout) -> Unit,
+    ): MaterialCardView = MaterialCardView(this).apply {
+        val cardContent = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+        }
+        content(cardContent)
+        addView(cardContent)
+        if (params != null) layoutParams = params
+    }
+
+    private fun sectionTitle(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 21f
+        setTypeface(typeface, Typeface.BOLD)
+    }
+
+    private fun bodyText(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 15f
+        setPadding(0, dp(8), 0, 0)
+    }
+
+    private fun primaryButton(text: String): MaterialButton = MaterialButton(this).apply {
+        this.text = text
+    }
+
+    private fun outlinedButton(text: String): MaterialButton = MaterialButton(
+        this,
+        null,
+        com.google.android.material.R.attr.materialButtonOutlinedStyle,
+    ).apply {
+        this.text = text
+    }
+
+    private fun matchParams(top: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(top)
+        }
+
+    private fun weightedParams(): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+
+    private fun formatBytes(bytes: Long): String =
+        String.format(Locale.US, "%.1f MB", bytes / 1_000_000.0)
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private data class Rating(val label: String, val value: Double)
+    private data class DeviceExperience(
+        val title: String,
+        val ratings: List<Rating>,
+        val detail: String = "",
+    )
+
+    private fun Double.toDisplay(): String =
+        if (this % 1.0 == 0.0) toInt().toString() else toString()
+
+    private companion object {
+        const val SPEECH_CENTRAL_URL =
+            "https://play.google.com/store/apps/details?id=com.labsiisoftware.speechcentral"
+        const val ALTERNATIVE_ENGINE_URL =
+            "https://play.google.com/store/apps/details?id=ai.lookbe.tts"
+    }
+}

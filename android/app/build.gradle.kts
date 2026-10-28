@@ -10,8 +10,8 @@ android {
         applicationId = "com.labsii.voices"
         minSdk = 30 // Android 11; matches Speech Central's minimum.
         targetSdk = 37
-        versionCode = 46
-        versionName = "0.6.29"
+        versionCode = 48
+        versionName = "0.6.31"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -96,5 +96,6 @@ tasks.named("preBuild").configure {
 dependencies {
     implementation("com.google.android.material:material:1.14.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("androidx.datastore:datastore-preferences:1.3.0")
     testImplementation("junit:junit:4.13.2")
 }

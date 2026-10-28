@@ -16,7 +16,7 @@ The application and Android TTS engine use the short display name **SC Kokoro**.
 0.98–1.02 bypass processing. Default pitch keeps the original audio.
 See [pitch listening checks](docs/PITCH_TESTING.md).
 
-Package ID: `com.labsii.voices`. Version: **0.6.29 (46)**.
+Package ID: `com.labsii.voices`. Version: **0.6.31 (48)**.
 
 Requires **Android 11 (API 30)** or newer, matching Speech Central, and an
 ARM64-capable Android system. This is a distribution baseline, not a guarantee
@@ -158,13 +158,15 @@ Vendor names and preliminary capability checks do not block downloads. After
 installation, the app gathers OpenCL diagnostics and tries a short, silent
 synthesis through the actual Android TTS service, even if the probe failed.
 The test runs once per app installation/update or Android build change on all
-GPUs. Failure offers **Retry device test** and **Copy diagnostics**, retains
-the downloaded files, and does not hide installed voices from other apps.
+GPUs. Failure offers **Retry device test**, **Copy diagnostics** and an optional
+link to the less demanding ToBe SAID offline TTS engine. It retains the
+downloaded files and does not hide installed voices from other apps.
 It does not imply that every OpenCL driver can run Kokoro successfully.
 
-The loader checks standard, Pixel, Mali and PowerVR library names, including
-Pixel wrapper initialization, and tries another library when a candidate lacks
-core functions or cannot enumerate platforms. Adreno GPUs receive estimated
+The loader checks standard Android 16 system, Pixel, Mali and PowerVR library
+names, including `libOpenCL_system.so` and Pixel wrapper initialization, and
+tries another library when a candidate lacks core functions or cannot enumerate
+platforms. Adreno GPUs receive estimated
 experience ratings; other hardware is experimental and remains unrated.
 The actual speech test verifies operation, not sustained performance. See
 [compatibility and installation checks](docs/COMPATIBILITY_TESTING.md).
@@ -173,6 +175,15 @@ Existing downloads are retained on upgrade and hashed once to migrate to
 per-file verification receipts. Open the app once after updating to complete
 verification and refresh packaged kernels/vocabulary. No full model download
 is required if the existing files are intact.
+
+### Default voice
+
+Open **Default voice** from SC Kokoro's ready screen, or open this engine's
+settings from Android text-to-speech settings. The selected voice is used by
+apps that do not provide their own Kokoro voice picker. A valid voice selected
+explicitly by a client app still takes priority. Settings use Preferences
+DataStore; existing onboarding and device-test state migrates automatically
+from the earlier `onboarding` SharedPreferences file.
 
 ### TTS client package visibility
 

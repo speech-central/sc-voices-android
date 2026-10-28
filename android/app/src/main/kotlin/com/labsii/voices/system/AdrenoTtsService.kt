@@ -25,7 +25,14 @@ import com.labsii.voices.BuildConfig
 import com.labsii.voices.runner.KokoroModelManager
 import com.labsii.voices.runner.KokoroPitch
 import com.labsii.voices.runner.KokoroSession
+import com.labsii.voices.settings.AppSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.util.Locale
 import java.util.concurrent.locks.ReentrantLock
@@ -34,6 +41,9 @@ import java.util.concurrent.locks.ReentrantLock
 class AdrenoTtsService : TextToSpeechService() {
     private lateinit var catalog: InstalledKokoroVoiceCatalog
     private lateinit var session: KokoroSession
+    private lateinit var settings: AppSettings
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var defaultVoiceId = AppSettings.DEFAULT_VOICE_ID
     private val synthesisWatchdog = SynthesisWatchdog()
     private lateinit var powerManager: PowerManager
     private var powerReceiverRegistered = false
@@ -56,6 +66,13 @@ class AdrenoTtsService : TextToSpeechService() {
     override fun onCreate() {
         // TextToSpeechService.onCreate() synchronously calls onLoadLanguage().
         catalog = InstalledKokoroVoiceCatalog(applicationContext)
+        settings = AppSettings(applicationContext)
+        defaultVoiceId = runCatching {
+            runBlocking(Dispatchers.IO) { settings.snapshot().defaultVoiceId }
+        }.getOrDefault(AppSettings.DEFAULT_VOICE_ID)
+        serviceScope.launch {
+            settings.snapshots.collect { defaultVoiceId = it.defaultVoiceId }
+        }
         session = KokoroSession(applicationContext, diagnosticsEnabled = BuildConfig.DEBUG)
         powerManager = getSystemService(PowerManager::class.java)
         if (BuildConfig.DEBUG) Log.i(
@@ -89,7 +106,7 @@ class AdrenoTtsService : TextToSpeechService() {
         }
     }
 
-    override fun onGetLanguage(): Array<String> = legacyLanguage(catalog.preferred()?.locale)
+    override fun onGetLanguage(): Array<String> = legacyLanguage(preferredVoice()?.locale)
 
     override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int {
         val voice = catalog.findForLanguage(lang, country) ?: return TextToSpeech.LANG_NOT_SUPPORTED
@@ -118,8 +135,16 @@ class AdrenoTtsService : TextToSpeechService() {
         }
     }
 
-    override fun onGetDefaultVoiceNameFor(lang: String?, country: String?, variant: String?): String? =
-        catalog.findForLanguage(lang, country)?.voiceName
+    override fun onGetDefaultVoiceNameFor(lang: String?, country: String?, variant: String?): String? {
+        val languageFallback = catalog.findForLanguage(lang, country) ?: return null
+        val installed = catalog.installed()
+        return DefaultVoicePolicy.select(
+            requested = null,
+            preferred = defaultVoiceId,
+            languageFallback = languageFallback.voiceName,
+            available = installed.mapTo(hashSetOf()) { it.voiceName },
+        )
+    }
 
     override fun onIsValidVoiceName(voiceName: String?): Int =
         if (catalog.findByVoiceName(voiceName) != null) TextToSpeech.SUCCESS else TextToSpeech.ERROR
@@ -163,8 +188,15 @@ class AdrenoTtsService : TextToSpeechService() {
                 Log.i(TAG, "KOKORO_PREP stage=request_created id=${current.id} " +
                     "requestMs=${voiceStageMs - requestStageMs} elapsedRealtimeMs=$voiceStageMs")
             }
-            val voice = catalog.findByVoiceName(request.voiceName)
-                ?: catalog.findForLanguage(request.language, request.country)
+            val installed = catalog.installed()
+            val languageFallback = catalog.findForLanguage(request.language, request.country)?.voiceName
+            val selectedVoice = DefaultVoicePolicy.select(
+                requested = request.voiceName,
+                preferred = defaultVoiceId,
+                languageFallback = languageFallback,
+                available = installed.mapTo(hashSetOf()) { it.voiceName },
+            )
+            val voice = installed.firstOrNull { it.voiceName == selectedVoice }
                 ?: throw IllegalStateException("Kokoro is not installed or does not support ${request.language}")
             if (BuildConfig.DEBUG) {
                 Log.i(TAG, "KOKORO_PREP stage=voice_resolved id=${current.id} " +
@@ -357,6 +389,7 @@ class AdrenoTtsService : TextToSpeechService() {
             powerReceiverRegistered = false
         }
         activeRequest?.cancelled?.set(true)
+        serviceScope.cancel()
         if (::session.isInitialized) session.close()
         super.onDestroy()
     }
@@ -428,6 +461,9 @@ class AdrenoTtsService : TextToSpeechService() {
         val country = try { locale.isO3Country } catch (_: Throwable) { locale.country }
         return arrayOf(language, country, locale.variant)
     }
+
+    private fun preferredVoice(): InstalledKokoroVoice? =
+        catalog.findByVoiceName(defaultVoiceId) ?: catalog.preferred()
 
     companion object {
         private const val TAG = "AdrenoTtsService"

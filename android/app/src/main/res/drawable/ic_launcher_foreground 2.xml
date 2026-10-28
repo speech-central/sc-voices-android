@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (C) 2026 Labsii Ltd. All rights reserved.
+  Reserved branding asset; not licensed under GPL-3.0-or-later.
+  See /BRANDING.md.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#55000000"
+        android:pathData="M39,28 L50,28 L50,50 L68,28 L81,28 L59,54 L82,82 L68,82 L50,59 L50,82 L39,82 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M37,26 L48,26 L48,48 L66,26 L79,26 L57,52 L80,80 L66,80 L48,57 L48,80 L37,80 Z" />
+</vector>
