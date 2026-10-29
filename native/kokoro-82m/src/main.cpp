@@ -157,7 +157,7 @@ static bool probe_kokoro_opencl(OpenCLContext& cl_ctx, std::string& reason) {
 int main(int argc, char** argv) {
     // Build marker — lets us confirm from the engine log which binary is
     // actually running. Bump the tag on every device-facing engine change.
-    fprintf(stderr, "[engine] kokoro build: 0.6.31 protocol=3\n");
+    fprintf(stderr, "[engine] kokoro build: 0.6.32 protocol=3\n");
     // (No version banner — debug_utils does not define one, and emitting an
     // undefined macro here was breaking every fresh-port build.)
     // Argument parsing: positional "prompt" + optional flags.
@@ -473,7 +473,7 @@ int main(int argc, char** argv) {
         startup_marker("phonemizer_end", voice.c_str());
 
         // Protocol v3 pairs every audio/terminal frame with a command ID.
-        std::fprintf(stderr, "ready. protocol=3 build=0.6.31\n");
+        std::fprintf(stderr, "ready. protocol=3 build=0.6.32\n");
         std::fflush(stderr);
         TtsCommandReader reader(STDIN_FILENO);
         TtsCommand command;

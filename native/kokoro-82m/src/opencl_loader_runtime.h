@@ -7,6 +7,7 @@
 #include <dlfcn.h>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace kokoro_cl_loader {
@@ -31,19 +32,38 @@ static Driver& driver() {
     static Driver selected;
     static std::once_flag once;
     std::call_once(once, [] {
+        // Match the lookup strategy used by OpenCL capability tools that are
+        // known to work on Samsung firmware: try canonical absolute paths
+        // before Android's generic sonames. Loading a generic dispatcher first
+        // can cause later aliases to resolve to the same unusable handle.
         const char* paths[] = {
-            "libOpenCL.so", "libOpenCL_system.so", "libOpenCL-pixel.so", "libOpenCL_adreno.so",
-            "libGLES_mali.so", "libmali.so", "libPVROCL.so",
-            "/vendor/lib64/libOpenCL.so", "/vendor/lib64/libOpenCL-pixel.so",
+            "/system/vendor/lib64/libOpenCL.so",
+            "/system/lib64/libOpenCL.so",
+            "/system/vendor/lib64/egl/libGLES_mali.so",
+            "/system/lib64/egl/libGLES_mali.so",
+            "/system/vendor/lib64/libPVROCL.so",
+            "/system/lib64/libPVROCL.so",
+            "/vendor/lib64/libOpenCL.so",
+            "/odm/lib64/libOpenCL.so",
+            "/system_ext/lib64/libOpenCL.so",
+            "/system_ext/lib64/libOpenCL_system.so",
+            "/vendor/lib64/libOpenCL-pixel.so",
+            "/odm/lib64/libOpenCL-pixel.so",
             "/vendor/lib64/libOpenCL_adreno.so",
-            "/vendor/lib64/egl/libOpenCL.so", "/vendor/lib64/egl/libOpenCL_adreno.so",
-            "/odm/lib64/libOpenCL.so", "/odm/lib64/libOpenCL-pixel.so",
-            "/odm/lib64/libOpenCL_adreno.so", "/system/vendor/lib64/libOpenCL.so",
-            "/system_ext/lib64/libOpenCL.so", "/system_ext/lib64/libOpenCL_system.so",
-            "/system/lib64/libOpenCL.so", "/system/lib64/libOpenCL_system.so",
-            "/vendor/lib64/libGLES_mali.so", "/vendor/lib64/egl/libGLES_mali.so",
-            "/system/vendor/lib64/egl/libGLES_mali.so", "/system/lib64/egl/libGLES_mali.so",
-            "/vendor/lib64/libPVROCL.so", "/system/vendor/lib64/libPVROCL.so",
+            "/odm/lib64/libOpenCL_adreno.so",
+            "/vendor/lib64/egl/libOpenCL.so",
+            "/vendor/lib64/egl/libOpenCL_adreno.so",
+            "/vendor/lib64/libGLES_mali.so",
+            "/vendor/lib64/egl/libGLES_mali.so",
+            "/vendor/lib64/libmali.so",
+            "/vendor/lib64/libPVROCL.so",
+            "libOpenCL.so",
+            "libOpenCL_system.so",
+            "libOpenCL-pixel.so",
+            "libOpenCL_adreno.so",
+            "libGLES_mali.so",
+            "libmali.so",
+            "libPVROCL.so",
         };
         const char* required[] = {
             "clGetPlatformIDs", "clGetPlatformInfo", "clGetDeviceIDs", "clGetDeviceInfo",
@@ -55,18 +75,44 @@ static Driver& driver() {
             "clEnqueueCopyBuffer", "clGetKernelWorkGroupInfo", "clFlush", "clFinish",
         };
         std::vector<std::string> failures;
+        struct FileIdentity { dev_t device; ino_t inode; };
+        std::vector<FileIdentity> triedFiles;
+        // Some vendor drivers leave process-global state behind when unloaded.
+        // Keep rejected candidates loaded locally for the lifetime of this
+        // short-lived worker instead of unloading and reopening an alias.
+        static std::vector<void*> retainedRejectedHandles;
         for (const char* path : paths) {
+            bool hasIdentity = false;
+            FileIdentity identity {};
+            if (path[0] == '/') {
+                struct stat info {};
+                if (stat(path, &info) == 0) {
+                    identity = {info.st_dev, info.st_ino};
+                    hasIdentity = true;
+                    bool duplicate = false;
+                    for (const auto& tried : triedFiles) {
+                        if (tried.device == identity.device && tried.inode == identity.inode) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (duplicate) continue;
+                }
+            }
             Driver candidate;
             struct Reset {
                 ~Reset() { initializing = nullptr; }
             } reset;
             initializing = &candidate;
-            candidate.handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+            candidate.handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
             if (!candidate.handle) {
                 const char* error = dlerror();
                 failures.emplace_back(std::string(path) + ": " + (error ? error : "could not load"));
                 continue;
             }
+            // Only mark an identity after this namespace could actually open
+            // it. A denied alias must not suppress an accessible equivalent.
+            if (hasIdentity) triedFiles.push_back(identity);
             auto enable = reinterpret_cast<void (*)()>(dlsym(candidate.handle, "enableOpenCL"));
             candidate.lookup = reinterpret_cast<Lookup>(dlsym(candidate.handle, "loadOpenCLPointer"));
             if (enable) enable();
@@ -91,7 +137,7 @@ static Driver& driver() {
             }
             failures.emplace_back(std::string(path) + (missing ? std::string(": missing ") + missing :
                 ": platform enumeration failed code=" + std::to_string(status) + " count=" + std::to_string(count)));
-            dlclose(candidate.handle);
+            retainedRejectedHandles.push_back(candidate.handle);
         }
         for (const auto& failure : failures) {
             fprintf(stderr, "KOKORO_OPENCL %.*s\n", 768, failure.c_str());

@@ -2,16 +2,19 @@ plugins {
     id("com.android.application")
 }
 
+val pinnedNdkVersion = "30.0.16248370"
+
 android {
     namespace = "com.labsii.voices"
     compileSdk = 37
+    ndkVersion = pinnedNdkVersion
 
     defaultConfig {
         applicationId = "com.labsii.voices"
         minSdk = 30 // Android 11; matches Speech Central's minimum.
         targetSdk = 37
-        versionCode = 48
-        versionName = "0.6.31"
+        versionCode = 50
+        versionName = "0.6.32"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -79,10 +82,12 @@ val stageKokoroRuntime = tasks.register<Exec>("stageKokoroRuntime") {
     inputs.file(setupScript)
     inputs.file(nativeBuildScript)
     inputs.file(stageScript)
+    inputs.property("kokoroNdkVersion", pinnedNdkVersion)
     outputs.dir(layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a"))
     outputs.dir(layout.projectDirectory.dir("src/main/assets/kokoro"))
 
     workingDir = projectRoot
+    environment("KOKORO_NDK_VERSION", pinnedNdkVersion)
     commandLine(
         "bash", "-c",
         "./scripts/setup_deps.sh && ./native/kokoro-82m/scripts/build.sh --release && ./android/scripts/prepare_assets.sh"

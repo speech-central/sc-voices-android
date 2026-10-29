@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstring>
+#include <dlfcn.h>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -13,6 +14,9 @@ static std::string scenario;
 static int good_driver, bad_driver, wrapper_driver;
 static bool enabled = false;
 static bool fallback_tried = false;
+static bool bare_tried = false;
+static bool loader_flags_ok = true;
+static int close_calls = 0;
 static int reentrant_calls = 0;
 static cl_int good_devices(cl_platform_id, cl_device_type, cl_uint, cl_device_id*, cl_uint* count) {
     if (count) *count = 7;
@@ -50,22 +54,27 @@ static void enable_opencl() {
     assert(devices == 7);
     ++reentrant_calls;
 }
-extern "C" void* __wrap_dlopen(const char* path, int) {
+extern "C" void* __wrap_dlopen(const char* path, int flags) {
     const std::string p(path);
+    loader_flags_ok = loader_flags_ok && (flags & RTLD_LAZY) && !(flags & RTLD_GLOBAL);
+    if (scenario == "absolute_first") {
+        if (p == "/system/vendor/lib64/libOpenCL.so") return &good_driver;
+        if (p == "libOpenCL.so") bare_tried = true;
+    }
     if (scenario == "generic" && p == "libOpenCL.so") return &good_driver;
     if (scenario == "android16_system") {
-        if (p == "libOpenCL.so") return &bad_driver;
-        if (p == "libOpenCL_system.so") {
+        if (p == "/system/vendor/lib64/libOpenCL.so") return &bad_driver;
+        if (p == "/system/lib64/libOpenCL.so") {
             fallback_tried = true;
             return &good_driver;
         }
     }
-    if (scenario == "pixel_direct" && p == "libOpenCL-pixel.so") return &good_driver;
-    if (scenario == "pixel_wrapper" && p == "libOpenCL-pixel.so") return &wrapper_driver;
-    if (scenario == "mali_soname" && p == "libGLES_mali.so") return &good_driver;
-    if (scenario == "powervr" && p == "libPVROCL.so") return &good_driver;
+    if (scenario == "pixel_direct" && p == "/vendor/lib64/libOpenCL-pixel.so") return &good_driver;
+    if (scenario == "pixel_wrapper" && p == "/vendor/lib64/libOpenCL-pixel.so") return &wrapper_driver;
+    if (scenario == "mali_soname" && p == "/system/vendor/lib64/egl/libGLES_mali.so") return &good_driver;
+    if (scenario == "powervr" && p == "/system/vendor/lib64/libPVROCL.so") return &good_driver;
     if (scenario == "fallback" || scenario == "missing_symbol") {
-        if (p == "libOpenCL.so") return &bad_driver;
+        if (p == "/system/vendor/lib64/libOpenCL.so") return &bad_driver;
         if (p == "/vendor/lib64/egl/libGLES_mali.so") {
             fallback_tried = true;
             return &good_driver;
@@ -87,7 +96,7 @@ extern "C" void* __wrap_dlsym(void* handle, const char* name) {
     }
     return function(name);
 }
-extern "C" int __wrap_dlclose(void*) { return 0; }
+extern "C" int __wrap_dlclose(void*) { ++close_calls; return 0; }
 extern "C" char* __wrap_dlerror() { return const_cast<char*>("test library unavailable"); }
 
 int main(int argc, char** argv) {
@@ -95,6 +104,9 @@ int main(int argc, char** argv) {
     scenario = argv[1];
     cl_uint count = 999;
     const cl_int result = clGetPlatformIDs(0, nullptr, &count);
+    assert(loader_flags_ok);
+    assert(close_calls == 0);
+    if (scenario == "absolute_first") assert(!bare_tried);
     if (scenario == "unavailable") {
         assert(result == CL_INVALID_OPERATION && count == 0);
     } else {

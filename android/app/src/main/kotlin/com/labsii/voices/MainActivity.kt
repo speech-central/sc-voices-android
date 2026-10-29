@@ -476,7 +476,7 @@ class MainActivity : Activity() {
                     } catch (failure: Exception) {
                         if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
                         diagnosticText = listOfNotNull(
-                            "SC Kokoro ${BuildConfig.VERSION_NAME}",
+                            "SC Kokoro ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
                             "Device: ${Build.MANUFACTURER} ${Build.MODEL}; Android ${Build.VERSION.RELEASE}",
                             "Build: ${Build.FINGERPRINT}",
                             "Renderer: ${probe?.renderer ?: "not detected"}",

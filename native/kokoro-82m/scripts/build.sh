@@ -69,10 +69,34 @@ fi
 # ============================================
 # Android NDK Setup
 # ============================================
+PINNED_NDK_VERSION="${KOKORO_NDK_VERSION:-}"
 ANDROID_NDK="${ANDROID_NDK:-${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}}}"
 
-# Auto-discover NDK if still empty
-if [ -z "$ANDROID_NDK" ] || [ ! -d "$ANDROID_NDK" ]; then
+# Gradle sets KOKORO_NDK_VERSION so the native runtime and the Android plugin
+# always use the same toolchain, regardless of which other NDK is newest.
+if [ -n "$PINNED_NDK_VERSION" ]; then
+    if [ ! -d "$ANDROID_NDK" ] || [ "$(basename "$ANDROID_NDK")" != "$PINNED_NDK_VERSION" ]; then
+        ANDROID_NDK=""
+        for NDK_BASE in \
+            "${ANDROID_SDK_ROOT:-}/ndk" \
+            "${ANDROID_HOME:-}/ndk" \
+            "$HOME/Library/Android/sdk/ndk" \
+            "$HOME/Android/Sdk/ndk"; do
+            if [ -d "$NDK_BASE/$PINNED_NDK_VERSION" ]; then
+                ANDROID_NDK="$NDK_BASE/$PINNED_NDK_VERSION"
+                break
+            fi
+        done
+    fi
+    if [ -z "$ANDROID_NDK" ]; then
+        echo "ERROR: Required Android NDK $PINNED_NDK_VERSION is not installed." >&2
+        echo "Install NDK (Side by side) $PINNED_NDK_VERSION from Android Studio's SDK Tools." >&2
+        exit 1
+    fi
+    echo "Using pinned NDK: $ANDROID_NDK"
+elif [ -z "$ANDROID_NDK" ] || [ ! -d "$ANDROID_NDK" ]; then
+    # Direct command-line builds without a requested version retain the old
+    # auto-discovery behavior.
     for NDK_BASE in \
         "${ANDROID_SDK_ROOT:-}/ndk" \
         "${ANDROID_HOME:-}/ndk" \
@@ -93,6 +117,16 @@ if [ -z "$ANDROID_NDK" ] || [ ! -d "$ANDROID_NDK" ]; then
     echo "ERROR: Android NDK not found at: $ANDROID_NDK"
     echo "Please set the ANDROID_NDK environment variable or install the Android NDK."
     exit 1
+fi
+
+# CMake cannot safely switch an existing Android build tree to a different
+# NDK. Reconfigure from scratch when the pinned toolchain changes.
+if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
+    CACHED_NDK=$(grep -E '^CMAKE_ANDROID_NDK:(PATH|INTERNAL)=' "$BUILD_DIR/CMakeCache.txt" | head -1 | cut -d= -f2-)
+    if [ -n "$CACHED_NDK" ] && [ "$CACHED_NDK" != "$ANDROID_NDK" ]; then
+        echo "Android NDK changed ($CACHED_NDK → $ANDROID_NDK) — forcing clean reconfigure"
+        CLEAN="yes"
+    fi
 fi
 
 TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake"

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export KOKORO_NDK_VERSION="30.0.16248370"
 
 "$PROJECT_DIR/scripts/setup_deps.sh"
 "$PROJECT_DIR/native/kokoro-82m/scripts/build.sh" --release

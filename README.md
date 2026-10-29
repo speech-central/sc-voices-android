@@ -16,7 +16,7 @@ The application and Android TTS engine use the short display name **SC Kokoro**.
 0.98–1.02 bypass processing. Default pitch keeps the original audio.
 See [pitch listening checks](docs/PITCH_TESTING.md).
 
-Package ID: `com.labsii.voices`. Version: **0.6.31 (48)**.
+Package ID: `com.labsii.voices`. Version: **0.6.32 (50)**.
 
 Requires **Android 11 (API 30)** or newer, matching Speech Central, and an
 ARM64-capable Android system. This is a distribution baseline, not a guarantee
@@ -97,20 +97,19 @@ Requirements:
 - Linux or macOS
 - JDK 17
 - Android SDK matching `compileSdk = 37`
-- Android NDK r25 or newer
+- Android NDK **30.0.16248370** (r30), installed side by side
 - CMake, Git, and curl (a connected device is not required to build)
 
 The complete build is available as one command:
 
 ```bash
-export ANDROID_NDK=/path/to/android-sdk/ndk/<version>
 ./build_android.sh
 ```
 
 Its individual steps are:
 
 ```bash
-export ANDROID_NDK=/path/to/android-sdk/ndk/<version>
+export KOKORO_NDK_VERSION=30.0.16248370
 
 ./scripts/setup_deps.sh
 

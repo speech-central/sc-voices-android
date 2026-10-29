@@ -30,6 +30,8 @@ import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.labsii.voices.runner.KokoroDeviceProbe
 import com.labsii.voices.runner.KokoroModelManager
 import com.labsii.voices.runner.KokoroSelfTest
+import com.labsii.voices.settings.AppSettings
+import com.labsii.voices.system.InstalledKokoroVoiceCatalog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -39,12 +41,12 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.util.Locale
-import androidx.core.content.edit
 
 /** First-run Kokoro installer and entry point to the installed system TTS engine. */
 class MainActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var manager: KokoroModelManager
+    private lateinit var settings: AppSettings
 
     private lateinit var downloadScreen: LinearLayout
     private lateinit var experienceScreen: LinearLayout
@@ -58,9 +60,9 @@ class MainActivity : Activity() {
     private lateinit var experienceTitleView: TextView
     private lateinit var experienceRows: LinearLayout
     private lateinit var experienceDetailView: TextView
+    private lateinit var defaultVoiceView: TextView
 
     private var detectedRenderer: String? = null
-    private val preferences by lazy { getSharedPreferences("onboarding", MODE_PRIVATE) }
     private var onboardingComplete = false
     private var selfTestPassed = false
     private var testingDevice = false
@@ -73,19 +75,24 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        onboardingComplete = preferences.getBoolean("complete", false)
         manager = KokoroModelManager.get(applicationContext)
+        settings = AppSettings(applicationContext)
         setContentView(buildUi())
         statusView.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        detectedRenderer = preferences.getString("tested_renderer", null)
-        selfTestPassed = preferences.getString("tested_generation", null) == testGeneration()
-        scope.launch { manager.state.collect { renderState(it) } }
-        manager.ensureInstalled()
+        scope.launch {
+            val saved = settings.snapshot()
+            onboardingComplete = saved.onboardingComplete
+            detectedRenderer = saved.testedRenderer
+            selfTestPassed = saved.testedGeneration == testGeneration()
+            launch { manager.state.collect { renderState(it) } }
+            manager.ensureInstalled()
+        }
     }
 
     override fun onPostResume() {
         super.onPostResume()
         refreshBackgroundReading()
+        refreshDefaultVoice()
     }
 
     override fun onDestroy() {
@@ -206,7 +213,7 @@ class MainActivity : Activity() {
         addView(primaryButton("Continue").apply {
             setOnClickListener {
                 onboardingComplete = true
-                preferences.edit { putBoolean("complete", true) }
+                scope.launch { settings.completeOnboarding() }
                 showScreen(readyScreen)
             }
         }, matchParams(top = 24))
@@ -219,6 +226,7 @@ class MainActivity : Activity() {
                 "All 28 English voices are installed. SC Kokoro is ready to use as an Android text-to-speech engine.",
             ))
         })
+        addView(defaultVoiceCard(), matchParams(top = 16))
         addView(backgroundReadingCard(), matchParams(top = 16))
         addView(speechCentralCard(), matchParams(top = 16))
         addView(outlinedButton("Credits and licenses").apply {
@@ -234,6 +242,37 @@ class MainActivity : Activity() {
         cardContent.addView(primaryButton("Get Speech Central").apply {
             setOnClickListener { openSpeechCentral() }
         }, matchParams(top = 20))
+    }
+
+    private fun defaultVoiceCard(): MaterialCardView = card { content ->
+        content.addView(sectionTitle("Default voice"))
+        defaultVoiceView = bodyText("Heart — English (United States)").apply {
+            setTypeface(typeface, Typeface.BOLD)
+        }
+        content.addView(defaultVoiceView)
+        content.addView(primaryButton("Choose voice").apply {
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, VoiceSettingsActivity::class.java))
+            }
+        }, matchParams(top = 16))
+    }
+
+    private fun refreshDefaultVoice() {
+        if (!::defaultVoiceView.isInitialized) return
+        scope.launch {
+            val selected = settings.snapshot().defaultVoiceId
+            val voice = InstalledKokoroVoiceCatalog(applicationContext).findByVoiceName(selected)
+            defaultVoiceView.text = if (voice == null) {
+                "Heart — English (United States)"
+            } else {
+                val region = if (voice.locale == Locale.UK) {
+                    "English (United Kingdom)"
+                } else {
+                    "English (United States)"
+                }
+                "${voice.displayName.removePrefix("Kokoro ")} — $region"
+            }
+        }
     }
 
     private fun backgroundReadingCard(): MaterialCardView = card { content ->
@@ -433,10 +472,7 @@ class MainActivity : Activity() {
                         // A lightweight probe failure must not prevent a real attempt.
                         KokoroSelfTest.run(applicationContext)
                         selfTestPassed = true
-                        preferences.edit {
-                            putString("tested_generation", testGeneration())
-                            putString("tested_renderer", detectedRenderer)
-                        }
+                        settings.saveDeviceTest(testGeneration(), detectedRenderer)
                     } catch (failure: Exception) {
                         if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
                         diagnosticText = listOfNotNull(

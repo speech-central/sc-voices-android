@@ -336,7 +336,7 @@ class KokoroModelManager private constructor(private val context: Context) {
         private const val ASSET_ROOT = "kokoro"
         private const val VOICE_DIRECTORY = "assets/voices/"
         private const val RUNTIME_MARKER = ".bundled_runtime_v1"
-        private const val RUNTIME_VERSION = "0.6.31-protocol3"
+        private const val RUNTIME_VERSION = "0.6.32-protocol3"
         private const val BUFFER_BYTES = 256 * 1024
         private const val PROGRESS_STEP_BYTES = 1024 * 1024
         private const val MIN_FREE_SPACE_BYTES = 32L * 1024L * 1024L

@@ -1,3 +1,25 @@
+# 0.6.32 — Samsung OpenCL provider selection
+
+- Try canonical absolute Android OpenCL paths before generic sonames, matching
+  the discovery order used by OpenCL capability tools that work on affected
+  Samsung firmware. Open candidates with lazy, local symbol binding.
+- Keep rejected vendor handles loaded for the worker lifetime and skip absolute
+  aliases that resolve to the same file. This avoids unloading and reopening a
+  driver after unsuccessful platform enumeration.
+- Pin both the Android plugin and the custom native staging build to NDK
+  **30.0.16248370**. A changed NDK invalidates the staging task and forces a
+  clean native CMake configuration.
+- Include the Android version code in copied device diagnostics so tester
+  reports distinguish builds that share the same version name.
+
+This is source version **0.6.32 (50)**. Model files, voice files, protocol 3,
+default-voice behavior and synthesis behavior are unchanged.
+
+Validation: all ten mock OpenCL provider scenarios and the native device-limit
+checks pass, including absolute-path precedence, lazy/local loading, wrapper
+reentry, rejected-provider isolation and fallback. A physical-device result is
+still required to confirm the Samsung firmware fix.
+
 # 0.6.31 — Persistent engine default voice
 
 - Add a dedicated Material voice-settings activity, advertised through the
